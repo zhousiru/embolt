@@ -4,10 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"maps"
 	"math"
 	"os"
-	"slices"
 	"sync"
 	"time"
 
@@ -205,14 +203,11 @@ func mean(xs []float64) float64 {
 	return sum / float64(len(xs))
 }
 
-// Persist restores beliefs from path and recent samples from the sample log,
-// then saves beliefs every 5 min and on exit.
+// Persist restores beliefs from path, then saves them every 5 min and on
+// exit. Recent samples, which only the pane shows, start empty.
 func (s *Stats) Persist(ctx context.Context, path string) {
 	if err := s.Restore(path); err != nil {
 		slog.Warn("could not restore beliefs; starting fresh", "err", err)
-	}
-	if err := s.restoreRecent(); err != nil {
-		slog.Warn("could not restore recent samples", "err", err)
 	}
 	tick := time.NewTicker(5 * time.Minute)
 	defer tick.Stop()
@@ -262,35 +257,6 @@ func (s *Stats) Restore(path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return json.Unmarshal(raw, &s.nodes)
-}
-
-// restoreRecent fills each known node's recent samples from the sample log,
-// which outlives a restart. The log is read without the lock; samples that
-// Record took in meanwhile stay, and only older logged ones go before them.
-func (s *Stats) restoreRecent() error {
-	if s.log == nil {
-		return nil
-	}
-	s.mu.Lock()
-	ids := slices.Collect(maps.Keys(s.nodes))
-	s.mu.Unlock()
-	found, err := lastSamples(s.log.dir, ids, recentLen)
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for id, logged := range found {
-		e := s.nodes[id]
-		if e == nil {
-			continue
-		}
-		if len(e.recent) > 0 {
-			first := e.recent[0].Time
-			logged = slices.DeleteFunc(logged, func(smp Sample) bool { return !smp.Time.Before(first) })
-		}
-		all := append(logged, e.recent...)
-		e.recent = all[max(0, len(all)-recentLen):]
-	}
-	return err
 }
 
 // breaker opens after 3 consecutive node faults, for 30 s doubling to 10 min.

@@ -87,47 +87,6 @@ func ReadSamples(dir string) iter.Seq2[Sample, error] {
 	}
 }
 
-// lastSamples returns up to n of the latest samples under dir for each of
-// ids, oldest first. It reads days newest first and stops once every node
-// has n.
-func lastSamples(dir string, ids []string, n int) (map[string][]Sample, error) {
-	files, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
-	if err != nil {
-		return nil, err
-	}
-	sort.Sort(sort.Reverse(sort.StringSlice(files)))
-	want := map[string]bool{}
-	for _, id := range ids {
-		want[id] = true
-	}
-	found := map[string][]Sample{}
-	for _, p := range files {
-		if len(want) == 0 {
-			break
-		}
-		f, err := os.Open(p)
-		if err != nil {
-			return found, err
-		}
-		day := map[string][]Sample{}
-		decodeLines(f, func(s Sample, err error) bool {
-			if err == nil && want[s.Node] {
-				day[s.Node] = append(day[s.Node], s)
-			}
-			return true
-		})
-		f.Close()
-		for id, ss := range day {
-			ss = append(ss, found[id]...) // an earlier day goes in front
-			found[id] = ss[max(0, len(ss)-n):]
-			if len(found[id]) >= n {
-				delete(want, id)
-			}
-		}
-	}
-	return found, nil
-}
-
 func decodeLines(r io.Reader, yield func(Sample, error) bool) bool {
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {
