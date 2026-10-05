@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -22,6 +23,13 @@ const (
 
 	keepVanished = 7 * 24 * time.Hour
 	recentLen    = 20
+)
+
+// A rate sample's weight in a node's rate now halves every nowHalfLife; it is
+// dropped after nowMemory, when it weighs under 1/1000.
+const (
+	nowHalfLife = 30 * time.Second
+	nowMemory   = 10 * nowHalfLife
 )
 
 // prior is a log-scale centre and spread.
@@ -61,9 +69,11 @@ func (s Sample) Mbps() float64 {
 	return max(float64(s.Bytes)*8/s.Dur.Seconds()/1e6, minRateMbps)
 }
 
-// State is a copy of what is known about one node.
+// State is a copy of what is known about one node. Rate is its typical rate,
+// which fades over hours; Now is its rate over the next minutes, see rateNow.
 type State struct {
 	RTT, Rate Belief
+	Now       Belief
 	OpenUntil time.Time
 	Recent    []Sample
 }
@@ -86,6 +96,13 @@ type entry struct {
 	Seen     time.Time `json:"seen"`
 	breaker  breaker
 	recent   []Sample
+	rates    []rateAt // within nowMemory
+}
+
+// rateAt is a rate sample: its log-Mbps and when it was taken.
+type rateAt struct {
+	at time.Time
+	x  float64
 }
 
 // NewStats keeps beliefs for every node and appends samples to sampleDir,
@@ -128,6 +145,8 @@ func (s *Stats) Record(n *nodes.Node, smp Sample) {
 	}
 	if r := smp.Mbps(); r > 0 {
 		e.Rate.Observe(math.Log(r), smp.Time, hl)
+		e.rates = append(slices.DeleteFunc(e.rates, func(old rateAt) bool { return smp.Time.Sub(old.at) > nowMemory }),
+			rateAt{smp.Time, math.Log(r)})
 	}
 }
 
@@ -149,12 +168,28 @@ func (s *Stats) StateAt(n *nodes.Node, now time.Time) State {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e := s.entry(n)
+	rate := e.Rate.AsOf(now, hl)
 	return State{
 		RTT:       e.RTT.AsOf(now, hl),
-		Rate:      e.Rate.AsOf(now, hl),
+		Rate:      rate,
+		Now:       rateNow(rate, e.rates, now),
 		OpenUntil: e.breaker.until,
 		Recent:    append([]Sample(nil), e.recent...),
 	}
+}
+
+// rateNow is a node's rate over the next minutes: its typical rate worth one
+// sample, then its rate samples from any session, each weighed by its age. A
+// node seen sagging half a minute ago is judged by the sag; one that sagged
+// minutes ago by its typical rate again, with the doubt of a node not seen
+// lately. The node a session reads and the nodes it might move to are judged
+// alike.
+func rateNow(typical Belief, rates []rateAt, now time.Time) Belief {
+	b := typical.Capped(1)
+	for _, r := range rates {
+		b.add(r.x, math.Exp2(-max(0, now.Sub(r.at).Seconds())/nowHalfLife.Seconds()))
+	}
+	return b
 }
 
 func (s *Stats) entry(n *nodes.Node) *entry {

@@ -41,7 +41,7 @@ proxy-providers:
 #                           # never sent; playback reports are, unchanged.
 
 # probes:
-#   max_new_ips_per_hour: 8 # distinct nodes explored on your token per hour
+#   budget: 0.05            # share of a session's bitrate spent on speed tests; 0 turns them off
 
 # listen: ":8096"
 # tls: {listen: ":8920", cert: /config/cert.pem, key: /config/key.pem}

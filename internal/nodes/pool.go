@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -187,8 +186,6 @@ func download(ctx context.Context, rawURL string) ([]byte, error) {
 func (p *Pool) build(provider string, mappings []map[string]any, keep func(string) bool) []*Node {
 	old := p.snap.Load().byID
 	var out []*Node
-	var mu sync.Mutex
-	var wg sync.WaitGroup
 	seen := map[string]bool{}
 	for _, m := range mappings {
 		name, _ := m["name"].(string)
@@ -201,18 +198,13 @@ func (p *Pool) build(provider string, mappings []map[string]any, keep func(strin
 			out = append(out, n)
 			continue
 		}
-		wg.Go(func() { // newNode resolves the server for its /24
-			n, err := newNode(provider, m)
-			if err != nil {
-				slog.Warn("skipping node", "provider", provider, "err", err)
-				return
-			}
-			mu.Lock()
-			out = append(out, n)
-			mu.Unlock()
-		})
+		n, err := newNode(provider, m)
+		if err != nil {
+			slog.Warn("skipping node", "provider", provider, "err", err)
+			continue
+		}
+		out = append(out, n)
 	}
-	wg.Wait()
 	return out
 }
 

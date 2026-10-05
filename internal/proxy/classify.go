@@ -51,9 +51,12 @@ func (s *Server) classify(r *http.Request) lane {
 	}
 }
 
-// query reads a parameter case-insensitively, as Emby does.
-func query(u *url.URL, key string) string {
-	for k, v := range u.Query() {
+// query reads a parameter of u case-insensitively, as Emby does.
+func query(u *url.URL, key string) string { return qget(u.Query(), key) }
+
+// qget reads a parameter case-insensitively, as Emby does.
+func qget(q url.Values, key string) string {
+	for k, v := range q {
 		if strings.EqualFold(k, key) && len(v) > 0 {
 			return v[0]
 		}

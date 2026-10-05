@@ -41,16 +41,11 @@ func TestMeterSamplesOnlyNetworkLimitedReading(t *testing.T) {
 		t.Fatalf("samples during the ramp after a pause: %v", got)
 	}
 
-	full, recent := m.take()
-	if !full || len(recent) != 2 {
-		t.Fatalf("take = %v, %v; want full and the 2 samples", full, recent)
+	if !m.full() {
+		t.Fatal("a pause did not mark the read-ahead full")
 	}
-	if full, _ := m.take(); full {
-		t.Error("full was not cleared by take")
-	}
-	m.moved()
-	if _, recent := m.take(); len(recent) != 0 {
-		t.Errorf("samples survived a move to another node: %v", recent)
+	if m.full() {
+		t.Error("full was not cleared")
 	}
 }
 
@@ -62,39 +57,27 @@ func TestMeterCountsAStall(t *testing.T) {
 	}
 }
 
-func TestMeterKeepsExploredSamplesApart(t *testing.T) {
-	var m meter
+// TestMeterEnd: a reading that is over yields its open window, or, if no
+// window completed, everything it read.
+func TestMeterEnd(t *testing.T) {
+	m := meter{kind: measure.KindExplore}
 	m.restart()
-	readAt(&m, 40, 6*time.Second)
-
-	m.explored()
-	per := time.Duration(float64(chunkSize*8) / 100e6 * float64(time.Second))
-	explored := 0
-	for d := time.Duration(0); d < 5*time.Second; d += per {
-		if s, ok := m.read(chunkSize, per); ok {
-			if s.Kind != measure.KindExplore || math.Abs(s.Mbps()-100) > 2 {
-				t.Fatalf("explored window: %s at %.1f Mbps, want explore at 100", s.Kind, s.Mbps())
-			}
-			explored++
-		}
-	}
-	if explored == 0 {
-		t.Fatal("no samples from the explored stretch")
-	}
-	m.home()
-	if _, recent := m.take(); len(recent) != 2 || math.Abs(recent[0]-40) > 1 {
-		t.Fatalf("media node's recent after exploring: %v, want its two ≈ 40 Mbps windows", recent)
+	readAt(&m, 100, 4500*time.Millisecond) // the ramp, one window, 1.5 s open
+	s, ok := m.end()
+	if !ok || s.Kind != measure.KindExplore || math.Abs(s.Mbps()-100) > 2 {
+		t.Fatalf("end = %+v (%.1f Mbps), %v; want the open window at 100 Mbps", s, s.Mbps(), ok)
 	}
 
-	// A fast node fills the read-ahead within its ramp: the whole stretch is
-	// its sample, ramp and all.
-	m.explored()
+	// A fast node reads a whole test within its ramp: the whole read is its
+	// sample, ramp and all.
+	m = meter{kind: measure.KindExplore}
+	m.restart()
 	m.read(8<<20, 500*time.Millisecond)
-	s, ok := m.home()
-	if !ok || s.Kind != measure.KindExplore || math.Abs(s.Mbps()-134.2) > 1 {
-		t.Fatalf("home = %+v (%.1f Mbps), %v; want the whole stretch at 134 Mbps", s, s.Mbps(), ok)
+	s, ok = m.end()
+	if !ok || math.Abs(s.Mbps()-134.2) > 1 {
+		t.Fatalf("end = %+v (%.1f Mbps), %v; want the whole read at 134 Mbps", s, s.Mbps(), ok)
 	}
-	if _, ok := m.home(); ok {
-		t.Error("home without a stretch gave a sample")
+	if _, ok := (&meter{}).end(); ok {
+		t.Error("a meter that read nothing gave a sample")
 	}
 }

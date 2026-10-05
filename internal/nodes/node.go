@@ -1,5 +1,5 @@
-// Package nodes turns subscriptions into nodes: stable IDs, diversity keys,
-// and two HTTP transports per node that dial through its mihomo outbound.
+// Package nodes turns subscriptions into nodes: stable IDs and two HTTP
+// transports per node that dial through its mihomo outbound.
 package nodes
 
 import (
@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/netip"
 	"sync"
 	"time"
 )
@@ -23,7 +22,6 @@ type Node struct {
 	Name     string
 	Protocol string
 	Provider string
-	Subnet   string // server /24 (or /48), else hostname: a diversity key
 
 	out *outbound
 
@@ -38,13 +36,11 @@ func newNode(provider string, mapping map[string]any) (*Node, error) {
 	if err != nil {
 		return nil, fmt.Errorf("node %q: %w", name, err)
 	}
-	host, _ := mapping["server"].(string)
 	return &Node{
 		ID:       nodeID(mapping),
 		Name:     name,
 		Protocol: typ,
 		Provider: provider,
-		Subnet:   subnet(host),
 		out:      out,
 	}, nil
 }
@@ -61,28 +57,6 @@ func nodeID(mapping map[string]any) string {
 	raw, _ := json.Marshal(m)
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:6])
-}
-
-func subnet(host string) string {
-	if host == "" { // direct and other serverless outbounds
-		return ""
-	}
-	addr, err := netip.ParseAddr(host)
-	if err != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		ips, err := lookupServer(ctx, host)
-		if err != nil || len(ips) == 0 {
-			return host
-		}
-		addr = ips[0]
-	}
-	bits := 24
-	if addr.Unmap().Is6() {
-		bits = 48
-	}
-	p, _ := addr.Unmap().Prefix(bits)
-	return p.String()
 }
 
 func (n *Node) dial(ctx context.Context, network, addr string) (net.Conn, error) {

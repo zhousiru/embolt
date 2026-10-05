@@ -4,7 +4,6 @@ import (
 	"math"
 	"time"
 
-	"github.com/zhousiru/embolt/internal/config"
 	"github.com/zhousiru/embolt/internal/measure"
 )
 
@@ -80,22 +79,6 @@ func expectedStall(rate measure.Belief, buffer time.Duration, bitrate float64) f
 		sum += (math.Exp(hi) - math.Exp(max(a, b))) * t.CDF(max(a, b))
 	}
 	return perMbps * sum
-}
-
-// streamRate is what a stream says about its own node. With no samples yet it
-// says nothing new, and the node is judged like any other. With samples, the
-// node's history counts as one sample of typical rate (its jitter estimate
-// kept) and the stream's samples of the last StreamMemory decide: the node
-// belief alone fades over hours and would take minutes to notice a sag.
-func streamRate(p config.Control, node measure.Belief, recent []float64, now time.Time) measure.Belief {
-	if len(recent) == 0 {
-		return node
-	}
-	b := node.Capped(1)
-	for _, mbps := range recent {
-		b.Observe(math.Log(mbps), now, p.HalfLife)
-	}
-	return b
 }
 
 // The primary is judged on a control burst: a library page of images, about

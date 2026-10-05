@@ -31,13 +31,18 @@ func NewBelief(mu, sigma, n float64) Belief {
 // 2^(−Δt/halfLife).
 func (b *Belief) Observe(x float64, now time.Time, halfLife time.Duration) {
 	b.fade(now, halfLife)
-	k := b.Kappa + 1
-	d := x - b.Mu
-	b.Beta += b.Kappa * d * d / (2 * k)
-	b.Mu += d / k
-	b.Kappa = k
-	b.Alpha += 0.5
+	b.add(x, 1)
 	b.At = now
+}
+
+// add folds in the sample x worth w samples.
+func (b *Belief) add(x, w float64) {
+	k := b.Kappa + w
+	d := x - b.Mu
+	b.Beta += b.Kappa * w * d * d / (2 * k)
+	b.Mu += w * d / k
+	b.Kappa = k
+	b.Alpha += w / 2
 }
 
 // Measured reports whether the belief holds any real sample.
@@ -50,8 +55,9 @@ func (b Belief) AsOf(now time.Time, halfLife time.Duration) Belief {
 }
 
 // Capped returns the belief with its typical value worth at most n samples:
-// the prior for a stream that then learns from itself. The jitter estimate
-// is kept, since a node's rate drifts but its jitter much less.
+// the prior for a node's rate now, which its recent samples then decide. The
+// jitter estimate is kept, since a node's rate drifts but its jitter much
+// less.
 func (b Belief) Capped(n float64) Belief {
 	b.Kappa = min(b.Kappa, n)
 	return b

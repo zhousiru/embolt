@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -33,10 +32,9 @@ const (
 )
 
 var (
-	errStall    = errors.New("stall")
-	errPaused   = errors.New("paused")
-	errChanged  = errors.New("file changed upstream")
-	errExplored = errors.New("explored") // the stretch is done: back to the media node
+	errStall   = errors.New("stall")
+	errPaused  = errors.New("paused")
+	errChanged = errors.New("file changed upstream")
 
 	underrun = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "embolt_session_stall_seconds_total",
@@ -44,7 +42,7 @@ var (
 	})
 	exploreBytes = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "embolt_explore_bytes_total",
-		Help: "Bytes of playback read through explored nodes; all of it is played.",
+		Help: "Bytes read by speed tests through explored nodes; none of it is played.",
 	})
 	chunks = sync.Pool{New: func() any { return new([chunkSize]byte) }}
 )
@@ -54,18 +52,9 @@ type switchTo struct{ n *nodes.Node }
 
 func (switchTo) Error() string { return "risk" }
 
-// exploreOn is the cause given when the controller has the feed read its
-// next stretch through another node.
-type exploreOn struct{ n *nodes.Node }
-
-func (exploreOn) Error() string { return "explore" }
-
 // feed fills one span from upstream. It opens the span's range on the
 // session's media node, and when the node fails, resumes at the span's end
 // on another node, so the players reading the span see one unbroken stream.
-// When the session can afford it, it may read the next stretch through
-// another node, a speed test whose bytes are played, then resume on the
-// media node.
 type feed struct {
 	s    *Server
 	sp   *span
@@ -80,9 +69,6 @@ type feed struct {
 	off, end  int64 // next byte to fetch; last byte wanted, -1 if unknown
 	total     int64 // full size from Content-Range, -1 if unknown
 	validator string
-	exploreTo time.Time // end of the explored stretch
-
-	exploring atomic.Bool // node is an explored node, not the media node
 	meter     meter
 
 	mu   sync.Mutex
@@ -144,27 +130,24 @@ func (fd *feed) serves(resp *http.Response, first int64) bool {
 	return false
 }
 
-// redirect ends the feed's live attempt with the cause pick returns, for
-// resume to act on. pick runs only while an attempt is live, so what it
-// picks is acted on, not lost to a feed that is paused or already resuming.
-func (fd *feed) redirect(pick func() error) {
+// redirect ends the feed's live attempt with cause, for resume to act on. A
+// feed that is paused or already resuming follows the session by itself.
+func (fd *feed) redirect(cause error) {
 	fd.mu.Lock()
 	defer fd.mu.Unlock()
-	if a := fd.live; a != nil && a.ctx.Err() == nil {
-		if cause := pick(); cause != nil {
-			a.cancel(cause)
-		}
+	if a := fd.live; a != nil {
+		a.cancel(cause)
 	}
 }
 
 // run fills the span until the file ends, the span goes, or no node can
 // continue.
 func (fd *feed) run(resp *http.Response) {
-	err := fd.fill(fd.ctx, resp)
+	fd.fill(fd.ctx, resp)
 	ra := fd.s.ra
 	ra.mu.Lock()
 	defer ra.mu.Unlock()
-	fd.sp.done, fd.sp.err = true, err
+	fd.sp.done = true
 	if fd.sp.dropped {
 		return
 	}
@@ -279,9 +262,6 @@ func (fd *feed) pump(a *attempt) error {
 			fd.s.stats.Record(fd.node, s)
 		}
 		if n > 0 {
-			if fd.exploring.Load() {
-				exploreBytes.Add(float64(n))
-			}
 			ra.mu.Lock()
 			kept := fd.sp.append(buf[:n])
 			ra.mu.Unlock()
@@ -289,10 +269,6 @@ func (fd *feed) pump(a *attempt) error {
 				return context.Canceled
 			}
 			fd.off += int64(n)
-			if fd.exploring.Load() && time.Now().After(fd.exploreTo) {
-				a.cancel(errExplored)
-				return errExplored
-			}
 		}
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			if fd.end < 0 || fd.off > fd.end {
@@ -309,18 +285,13 @@ func (fd *feed) pump(a *attempt) error {
 
 // awaitRoom waits until the span has room for more. When it stays full for
 // 30 s its players have paused or left: the upstream closes, and reopens at
-// the span's end once there is room. An explored stretch ends as soon as the
-// read-ahead is full. A redirect ends the wait at once.
+// the span's end once there is room. A redirect ends the wait at once.
 func (fd *feed) awaitRoom(a *attempt) error {
 	ra := fd.s.ra
 	ra.mu.Lock()
 	defer ra.mu.Unlock()
 	if fd.sp.room() {
 		return nil
-	}
-	if fd.exploring.Load() {
-		a.cancel(errExplored)
-		return errExplored
 	}
 	fd.meter.paused()
 	idle := time.NewTimer(pauseLimit)
@@ -341,33 +312,19 @@ func (fd *feed) awaitRoom(a *attempt) error {
 // goes to the controller's choice; a stall or error fails over to the best
 // other node, or follows the session if another feed already moved it; a
 // pause reopens on the session's media node once the players have drained
-// half the read-ahead. An exploration reads through its node once they have
-// drained half; whatever ends it, the feed comes back to the media node.
-// If-Range guards against a file that changed: a 200 instead of 206 ends the
-// feed.
+// half the read-ahead. Only a node that cannot connect is failed over: any
+// answer from the server ends the feed, since another node would get the
+// same. If-Range guards against a file that changed: a 200 instead of 206.
 func (fd *feed) resume(ctx context.Context, cause error) (*http.Response, error) {
 	rng := fmt.Sprintf("bytes=%d-", fd.off)
 	if fd.end >= 0 {
 		rng += strconv.FormatInt(fd.end, 10)
 	}
-	if fd.exploring.Load() {
-		fd.endExplore(cause)
-		cause = errExplored
-	}
 	n, reason := fd.node, ""
 	var sw switchTo
-	var ex exploreOn
 	switch {
 	case errors.As(cause, &sw):
 		n, reason = sw.n, "risk"
-	case errors.As(cause, &ex):
-		if err := fd.waitForRoom(ctx); err != nil {
-			return nil, err
-		}
-		if resp := fd.explore(ctx, ex.n, rng); resp != nil {
-			return resp, nil
-		}
-	case errors.Is(cause, errExplored): // back on the media node at the next byte
 	case errors.Is(cause, errPaused):
 		if err := fd.waitForRoom(ctx); err != nil {
 			return nil, err
@@ -391,21 +348,18 @@ func (fd *feed) resume(ctx context.Context, cause error) (*http.Response, error)
 		switch {
 		case err != nil:
 		case resp.StatusCode == http.StatusPartialContent && fd.sameFile(resp):
-			if n != fd.node {
-				fd.node = n
-				fd.meter.moved()
-			} else {
-				fd.meter.restart()
-			}
+			fd.node = n
+			fd.meter.restart()
 			if n != fd.play.Node() {
 				fd.play.Switched(n, reason)
 			}
 			return resp, nil
-		case resp.StatusCode == http.StatusOK:
+		case resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent:
 			resp.Body.Close()
 			return nil, errChanged
-		default:
+		default: // the server's fault, not the node's
 			resp.Body.Close()
+			return nil, fmt.Errorf("upstream answered %s", resp.Status)
 		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -414,41 +368,6 @@ func (fd *feed) resume(ctx context.Context, cause error) (*http.Response, error)
 		n = fd.play.Failover(n)
 	}
 	return nil, control.ErrNoNode
-}
-
-// explore reopens the rest of the range on n for up to a stretch, or until
-// the read-ahead is full again. It returns nil, and the feed stays on its
-// node, when n cannot serve the range.
-func (fd *feed) explore(ctx context.Context, n *nodes.Node, rng string) *http.Response {
-	resp, err := fd.open(ctx, n, rng, fd.validator)
-	switch {
-	case err != nil:
-		return nil
-	case resp.StatusCode == http.StatusPartialContent && fd.sameFile(resp):
-		fd.node, fd.exploreTo = n, time.Now().Add(control.ExploreStretch)
-		fd.exploring.Store(true)
-		fd.meter.explored()
-		return resp
-	case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests:
-		fd.s.ctrl.Refused()
-	}
-	resp.Body.Close()
-	return nil
-}
-
-// endExplore puts the feed back on the session's media node. The stretch's
-// last sample counts for the explored node, and so does a failure: it never
-// counts against the session's media node.
-func (fd *feed) endExplore(cause error) {
-	if s, ok := fd.meter.home(); ok {
-		fd.s.stats.Record(fd.node, s)
-	}
-	if !errors.Is(cause, errExplored) {
-		fd.s.stats.Record(fd.node, measure.Sample{Kind: measure.KindExplore, Err: measure.Redact(cause)})
-	}
-	slog.Debug("explored", "node", fd.node.Name, "end", cause)
-	fd.exploring.Store(false)
-	fd.node = fd.play.Node()
 }
 
 // waitForRoom waits until the span's players have drained half its

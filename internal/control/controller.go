@@ -51,20 +51,19 @@ type Controller struct {
 	mu      sync.Mutex
 	primary *nodes.Node
 	plays   map[string]*Playback
-	refused time.Time            // exploration paused until
-	tested  map[string]time.Time // node ID → last explored, for the exit-IP cap
-	peak    float64              // highest bitrate played within peakMemory
+	refused time.Time // exploration paused until
+	probing bool      // a test is running
+	peak    float64   // highest bitrate played within peakMemory
 	peakAt  time.Time
 }
 
 func New(cfg *config.Store, pool *nodes.Pool, stats *measure.Stats) *Controller {
 	return &Controller{
-		cfg:    cfg,
-		pool:   pool,
-		stats:  stats,
-		base:   cfg.Load().Upstream.Base(),
-		plays:  map[string]*Playback{},
-		tested: map[string]time.Time{},
+		cfg:   cfg,
+		pool:  pool,
+		stats: stats,
+		base:  cfg.Load().Upstream.Base(),
+		plays: map[string]*Playback{},
 	}
 }
 
@@ -159,7 +158,7 @@ func (c *Controller) reconsiderPrimary() {
 		return
 	}
 	best := c.quickest(c.usable(func(n *nodes.Node) bool { return n != c.primary }))
-	if best != nil && len(c.busy()) == 0 && probFaster(c.burst(best), c.burst(c.primary), primaryMargin) >= primaryConf {
+	if best != nil && !c.playing() && probFaster(c.burst(best), c.burst(c.primary), primaryMargin) >= primaryConf {
 		c.setPrimary(best)
 	}
 }
@@ -182,22 +181,12 @@ func (c *Controller) pingAll(ctx context.Context) {
 	c.reconsiderPrimary()
 }
 
-// explorable orders the usable nodes that no stream is reading for a test,
-// by Thompson sampling: one draw of each node's typical rate from its
-// posterior, highest first.
-func (c *Controller) explorable(busy map[*nodes.Node]bool, now time.Time) []*nodes.Node {
-	beliefs := map[*nodes.Node]measure.Belief{}
-	for _, n := range c.usable(func(n *nodes.Node) bool { return !busy[n] }) {
-		beliefs[n] = c.stats.StateAt(n, now).Rate
-	}
-	return byDraw(beliefs)
-}
-
 // byDraw ranks nodes by one draw each from the posterior of their typical
-// rate. A node that may be fast but is barely measured often draws high, a
-// node known to be slow seldom does, and a node known to be fast does now
-// and then, which keeps the fallbacks' beliefs fresh. As beliefs fade, the
-// draws spread and exploration widens again.
+// rate, highest first: Thompson sampling. A node that may be fast but is
+// barely measured often draws high, a node known to be slow seldom does, and
+// a node known to be fast does now and then, which keeps the fallbacks'
+// beliefs fresh. As beliefs fade, the draws spread and exploration widens
+// again.
 func byDraw(beliefs map[*nodes.Node]measure.Belief) []*nodes.Node {
 	draw := make(map[*nodes.Node]float64, len(beliefs))
 	for n, b := range beliefs {
@@ -206,27 +195,6 @@ func byDraw(beliefs map[*nodes.Node]measure.Belief) []*nodes.Node {
 	ranked := slices.Collect(maps.Keys(draw))
 	slices.SortFunc(ranked, func(a, b *nodes.Node) int { return cmp.Compare(draw[b], draw[a]) })
 	return ranked
-}
-
-// firstWithinIPCap takes the first ranked node that keeps the distinct exit
-// IPs the server sees on the player's token within max_new_ips_per_hour, and
-// counts it. Caller holds c.mu.
-func (c *Controller) firstWithinIPCap(ranked []*nodes.Node, now time.Time) *nodes.Node {
-	recent := 0
-	for id, t := range c.tested {
-		if now.Sub(t) > time.Hour {
-			delete(c.tested, id)
-		} else {
-			recent++
-		}
-	}
-	for _, n := range ranked {
-		if _, seen := c.tested[n.ID]; seen || recent < c.cfg.Load().Probes.MaxNewIPsPerHour {
-			c.tested[n.ID] = now
-			return n
-		}
-	}
-	return nil
 }
 
 // typicalMbps is the bitrate to judge at when none is known: the highest
@@ -238,14 +206,14 @@ func (c *Controller) typicalMbps() float64 {
 	return c.peak
 }
 
-func (c *Controller) busy() map[*nodes.Node]bool {
-	b := map[*nodes.Node]bool{}
+// playing reports whether any session has a stream. Caller holds c.mu.
+func (c *Controller) playing() bool {
 	for _, p := range c.plays {
 		if len(p.streams) > 0 {
-			b[p.node] = true
+			return true
 		}
 	}
-	return b
+	return false
 }
 
 func (c *Controller) expire() {

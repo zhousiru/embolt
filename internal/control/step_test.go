@@ -66,7 +66,8 @@ func TestByDraw(t *testing.T) {
 	}
 }
 
-// testController has two direct nodes, a and b, with the given rate beliefs.
+// testController has two direct nodes, a and b, with the given rate samples
+// from 10 minutes ago: their typical rates, with nothing seen lately.
 func testController(t *testing.T, rates map[string][]float64) (*Controller, map[string]*nodes.Node) {
 	t.Helper()
 	cfg, err := config.Parse([]byte(`
@@ -88,11 +89,27 @@ data_dir: ` + t.TempDir()))
 	byName := map[string]*nodes.Node{}
 	for _, n := range pool.All() {
 		byName[n.Name] = n
-		for _, r := range rates[n.Name] {
-			stats.Record(n, measure.Sample{Kind: measure.KindPassive, Bytes: int64(r * 1e6 / 8 * 2), Dur: measure.Window})
-		}
+		record(stats, n, 10*time.Minute, rates[n.Name]...)
 	}
 	return New(store, pool, stats), byName
+}
+
+// cycle is n rate samples cycling through mbps: a rate well known.
+func cycle(n int, mbps ...float64) []float64 {
+	out := make([]float64, n)
+	for i := range out {
+		out[i] = mbps[i%len(mbps)]
+	}
+	return out
+}
+
+// record records rate samples on n, one per window, the last taken age ago.
+func record(stats *measure.Stats, n *nodes.Node, age time.Duration, mbps ...float64) {
+	last := time.Now().Add(-age)
+	for i, r := range mbps {
+		at := last.Add(-time.Duration(len(mbps)-1-i) * measure.Window)
+		stats.Record(n, measure.Sample{Kind: measure.KindPassive, Bytes: int64(r * 1e6 / 8 * 2), Dur: measure.Window, Time: at})
+	}
 }
 
 // TestStepLeavesASaggingNodeAtOnce replays 14:53 of the 2026-10-05 retest:
@@ -100,7 +117,7 @@ data_dir: ` + t.TempDir()))
 // 2.5 and 5.8 Mbps on a 22 Mbps video with nothing buffered. With a healthy
 // other node, the first step with those samples must switch.
 func TestStepLeavesASaggingNodeAtOnce(t *testing.T) {
-	c, n := testController(t, map[string][]float64{"a": {517, 571, 353, 692}, "b": {110, 120, 95, 130}})
+	c, n := testController(t, map[string][]float64{"a": cycle(20, 517, 571, 353, 692), "b": cycle(20, 110, 120, 95, 130)})
 	s, err := c.Play("tv/593931", 22.2)
 	if err != nil {
 		t.Fatal(err)
@@ -108,7 +125,8 @@ func TestStepLeavesASaggingNodeAtOnce(t *testing.T) {
 	if s.Node() != n["a"] {
 		t.Fatalf("media node %v, want a", s.Node())
 	}
-	obs := Observation{Delivered: 2 * time.Second, Elapsed: 6 * time.Second, Recent: []float64{2.5, 5.8}}
+	record(c.stats, n["a"], 0, 2.5, 5.8)
+	obs := Observation{Delivered: 2 * time.Second, Elapsed: 6 * time.Second}
 	if got := s.Step(obs); got != n["b"] {
 		t.Errorf("Step = %v, want a switch to b", got)
 	}
@@ -122,7 +140,8 @@ func TestStepStaysWhenThePlayerHasBuffer(t *testing.T) {
 	}
 	// The stream runs a little above the bitrate and the player holds ~40 s:
 	// no reason to spend an exit IP.
-	obs := Observation{Delivered: 70 * time.Second, Elapsed: 30 * time.Second, Recent: []float64{26, 24, 27}}
+	record(c.stats, n["a"], 0, 26, 24, 27)
+	obs := Observation{Delivered: 70 * time.Second, Elapsed: 30 * time.Second}
 	if got := s.Step(obs); got != nil {
 		t.Errorf("Step = %v, want stay (risk %.4f)", got, s.risk)
 	}
@@ -132,7 +151,7 @@ func TestStepStaysWhenThePlayerHasBuffer(t *testing.T) {
 }
 
 func TestOnlyTheLeadStreamDecides(t *testing.T) {
-	c, n := testController(t, map[string][]float64{"a": {517, 571, 353, 692}, "b": {110, 120, 95, 130}})
+	c, n := testController(t, map[string][]float64{"a": cycle(20, 517, 571, 353, 692), "b": cycle(20, 110, 120, 95, 130)})
 	play, _ := c.Play("tv/1", 22.2)
 	if play.Node() != n["a"] {
 		t.Fatalf("media node %v, want a", play.Node())
@@ -140,11 +159,12 @@ func TestOnlyTheLeadStreamDecides(t *testing.T) {
 	scan, _ := c.Play("tv/1", 22.2)
 	play.Step(Observation{Delivered: 30 * time.Second, Elapsed: 20 * time.Second, Full: true})
 	// The scan reads a little, then nothing: alone it would look like a stall.
-	if got := scan.Step(Observation{Delivered: time.Second, Elapsed: 6 * time.Second, Recent: []float64{1, 1}}); got != nil {
+	record(c.stats, n["a"], 0, 1, 1)
+	if got := scan.Step(Observation{Delivered: time.Second, Elapsed: 6 * time.Second}); got != nil {
 		t.Errorf("a side connection switched the session to %v", got)
 	}
 	// The same starvation on the lead stream does move the session.
-	if got := play.Step(Observation{Delivered: 30 * time.Second, Elapsed: 40 * time.Second, Recent: []float64{1, 1}}); got != n["b"] {
+	if got := play.Step(Observation{Delivered: 30 * time.Second, Elapsed: 40 * time.Second}); got != n["b"] {
 		t.Errorf("lead stream starving: Step = %v, want a switch to b", got)
 	}
 }
@@ -207,7 +227,7 @@ func TestPrimaryMovesOnlyWhenSureAndIdle(t *testing.T) {
 // TestSessionShowsTheStepsChoice: the session view must judge nodes as Step
 // does, and say why it stays or moves.
 func TestSessionShowsTheStepsChoice(t *testing.T) {
-	c, n := testController(t, map[string][]float64{"a": {517, 571, 353, 692}, "b": {110, 120, 95, 130}})
+	c, n := testController(t, map[string][]float64{"a": cycle(20, 517, 571, 353, 692), "b": cycle(20, 110, 120, 95, 130)})
 	s, _ := c.Play("tv/1", 22.2)
 	s.Step(Observation{Full: true})
 	d := c.Session("tv/1")
@@ -218,7 +238,8 @@ func TestSessionShowsTheStepsChoice(t *testing.T) {
 		t.Fatalf("choices %+v, want a staying, then b with a gap", d.Choices)
 	}
 
-	obs := Observation{Delivered: 2 * time.Second, Elapsed: 6 * time.Second, Recent: []float64{2.5, 5.8}}
+	record(c.stats, n["a"], 0, 2.5, 5.8)
+	obs := Observation{Delivered: 2 * time.Second, Elapsed: 6 * time.Second}
 	s.Step(obs)
 	d = c.Session("tv/1")
 	if d.Verdict.To == nil || d.Verdict.To.ID != n["b"].ID {
@@ -226,6 +247,33 @@ func TestSessionShowsTheStepsChoice(t *testing.T) {
 	}
 	if c.Session("tv/2").Session != nil {
 		t.Error("an unknown session has a view")
+	}
+}
+
+// TestStepDoesNotReturnToANodeItJustLeft replays 14:32 of the 2026-10-05
+// session 5e82c7d6: a 40 Mbps video flapping between two nodes every 22 s.
+// The session left b when it sagged to ~25 Mbps and now reads a, a little
+// under the target. Judged by its typical rate, b looked certain to keep up
+// and the session went straight back; judged as a is, by what it did half a
+// minute ago, b is worse than staying.
+func TestStepDoesNotReturnToANodeItJustLeft(t *testing.T) {
+	c, n := testController(t, map[string][]float64{"a": {40, 44, 37, 42, 39, 41, 36, 45}, "b": cycle(60, 33, 35, 37)})
+	a, b := n["a"], n["b"]
+	record(c.stats, b, 25*time.Second, 24, 27, 22, 26, 25, 23, 27, 24, 26, 22)
+	record(c.stats, a, 0, 37, 35, 39, 36, 38, 34, 37, 36, 38, 35, 37)
+	s, _ := c.Play("tv/1512410", 40)
+	if s.Node() != a {
+		t.Fatalf("media node %v, want a, the faster of late", s.Node())
+	}
+	const buffer = 40 * time.Second
+	if r := stallRisk(c.stats.State(b).Rate, buffer-c.switchGap(b), 40); r > c.cfg.Load().Control.StallRisk {
+		t.Fatalf("b's typical rate: risk %.4f, want it to pass, as it did when it drew the session back", r)
+	}
+	if got := s.Step(Observation{ReadAhead: buffer}); got != nil {
+		t.Errorf("Step = %v, want stay: b sagged half a minute ago", got)
+	}
+	if s.risk <= c.cfg.Load().Control.StallRisk {
+		t.Errorf("a's risk %.4f is under target: the step never weighed a move", s.risk)
 	}
 }
 
@@ -238,32 +286,88 @@ func TestUnknownBitrateUsesTheRecentPeak(t *testing.T) {
 	}
 }
 
-// TestExploreWhenAffordable: a session tests another node whenever its
-// buffer can absorb the test failing, full read-ahead or not, and not again
-// within the gap. A short buffer cannot absorb it.
-func TestExploreWhenAffordable(t *testing.T) {
-	healthy := map[string][]float64{"a": {25, 24, 26}, "b": {25, 24, 26}}
-	c, n := testController(t, healthy)
-	s, _ := c.Play("tv/1", 5)
-	other := n["a"]
-	if s.Node() == other {
+// TestExploreWithinBudget: a session tests at once a node that out-draws its
+// media node, whatever its buffer; one test runs at a time, and the next
+// waits for the session to earn one again at its bitrate.
+func TestExploreWithinBudget(t *testing.T) {
+	c, n := testController(t, nil)
+	s, _ := c.Play("tv/1", 40)
+	media, other := s.Node(), n["a"]
+	if media == other {
 		other = n["b"]
 	}
-	if got := s.Explore(); got != nil {
-		t.Fatalf("explored %v with nothing buffered", got)
-	}
-	s.Step(Observation{ReadAhead: 35 * time.Second, Recent: []float64{25}})
+	record(c.stats, media, 0, cycle(40, 3)...)
+	record(c.stats, other, 0, cycle(40, 100)...)
+	s.Step(Observation{}) // the media node falls short
 	if got := s.Explore(); got != other {
-		t.Fatalf("with 35 s of a 60 s read-ahead: Explore = %v, want %v", got, other)
+		t.Fatalf("with nothing buffered: Explore = %v, want %v", got, other)
 	}
 	if got := s.Explore(); got != nil {
-		t.Errorf("explored %v again within %v", got, exploreGap)
+		t.Errorf("explored %v while a test runs", got)
+	}
+	s.Probed(ProbeBytes)
+	// 5% of 40 Mbps for 10 s is 2.5 MB: a 32 MiB test takes 14 steps.
+	for i := 1; i <= 14; i++ {
+		s.earned = s.earned.Add(-time.Minute) // earns for earnGap, not the minute
+		got := s.Explore()
+		if i < 14 && got != nil {
+			t.Fatalf("explored after earning %d times", i)
+		}
+		if i == 14 && got != other {
+			t.Fatalf("Explore = %v once the session earned a test, want %v", got, other)
+		}
+	}
+}
+
+// TestNoTestWhileFine: a session that keeps up, with a fallback known to
+// keep up, tests nothing; once the fallback's belief has faded, it does.
+func TestNoTestWhileFine(t *testing.T) {
+	c, n := testController(t, nil)
+	s, _ := c.Play("tv/1", 40)
+	media, other := s.Node(), n["a"]
+	if media == other {
+		other = n["b"]
+	}
+	record(c.stats, media, 0, cycle(40, 100)...)
+	record(c.stats, other, time.Hour, cycle(40, 100)...)
+	s.Step(Observation{ReadAhead: time.Minute, Full: true})
+	for range 100 {
+		if got := s.Explore(); got != nil {
+			t.Fatalf("tested %v with the media node and a fallback both keeping up", got)
+		}
 	}
 
-	c, _ = testController(t, healthy)
-	s, _ = c.Play("tv/2", 5)
-	s.Step(Observation{ReadAhead: 12 * time.Second, Recent: []float64{25}})
-	if got := s.Explore(); got != nil {
-		t.Errorf("with 12 s buffered, explored %v: a failed test would stall", got)
+	c, n = testController(t, nil)
+	s, _ = c.Play("tv/1", 40)
+	media, other = s.Node(), n["a"]
+	if media == other {
+		other = n["b"]
+	}
+	record(c.stats, media, 0, cycle(40, 100)...)
+	record(c.stats, other, 24*time.Hour, cycle(40, 100)...)
+	s.Step(Observation{ReadAhead: time.Minute, Full: true})
+	for range 100 {
+		if s.Explore() == other {
+			return
+		}
+	}
+	t.Error("never tested a fallback last seen a day ago")
+}
+
+// TestNoTestOfSlowerNodes: a media node known to be fast out-draws a node
+// known to be slow, so the session tests nothing.
+func TestNoTestOfSlowerNodes(t *testing.T) {
+	c, n := testController(t, nil)
+	s, _ := c.Play("tv/1", 40)
+	media, other := s.Node(), n["a"]
+	if media == other {
+		other = n["b"]
+	}
+	record(c.stats, media, 0, cycle(40, 100)...)
+	record(c.stats, other, 0, cycle(40, 3)...)
+	for range 100 {
+		if got := s.Explore(); got != nil {
+			t.Fatalf("tested %v, known to be slower than the media node", got)
+		}
 	}
 }

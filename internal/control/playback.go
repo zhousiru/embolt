@@ -13,16 +13,16 @@ import (
 
 const (
 	minSwitchGap = 20 * time.Second
-	switchRamp   = time.Second // a new node's ramp-up before it delivers
-	exploreGap   = time.Minute
+	switchRamp   = time.Second      // a new node's ramp-up before it delivers
+	earnGap      = 10 * time.Second // the longest a session earns for between steps: not while paused
 )
 
-// ExploreStretch is the longest stretch a session reads through an explored
-// node.
-const ExploreStretch = 8 * time.Second
-
-// StreamMemory is how far back a stream's own rate samples count.
-const StreamMemory = 30 * time.Second
+// A test reads up to ProbeBytes through an explored node, beside the media
+// node, for up to ProbeTime.
+const (
+	ProbeBytes = 32 << 20
+	ProbeTime  = 8 * time.Second
+)
 
 // Playback is one viewing session: one device watching one item. It holds
 // the media node and the controller's view of the buffer.
@@ -39,15 +39,15 @@ type Playback struct {
 	bitrate   float64
 	node      *nodes.Node
 	switched  time.Time
-	explored  time.Time // last read a stretch through another node
+	credit    float64   // bytes the session may spend on tests
+	earned    time.Time // when it last earned credit
 	failovers int
 	streams   map[*Stream]struct{}
 	viewers   int // player connections
 	idle      time.Time
 	buffer    time.Duration
 	live      float64
-	recent    []float64 // the lead stream's rate samples, Mbps
-	full      bool      // the read-ahead filled since the last step
+	full      bool // the read-ahead filled since the last step
 	risk      float64
 }
 
@@ -64,7 +64,6 @@ type Observation struct {
 	Delivered time.Duration // media handed to players since the stream opened
 	Elapsed   time.Duration // since the stream opened
 	Full      bool          // the read-ahead filled since the last step
-	Recent    []float64     // the stream's rate samples (Mbps) within StreamMemory
 }
 
 // buffer is the media ahead of playback: the read-ahead plus a lower bound
@@ -91,6 +90,9 @@ func (c *Controller) Play(key string, bitrate float64) (*Stream, error) {
 			return nil, ErrNoNode
 		}
 		p = &Playback{c: c, key: key, started: now, bitrate: bitrate, node: n, streams: map[*Stream]struct{}{}}
+		if c.cfg.Load().Probes.Budget > 0 {
+			p.credit = ProbeBytes // a session that starts on a bad node may test at once
+		}
 		c.plays[key] = p
 		slog.Info("playback started", "session", key, "media", n.Name, "bitrate_mbps", round1(bitrate), "reason", why)
 	}
@@ -144,16 +146,13 @@ func (p *Playback) Bitrate() float64 {
 }
 
 // pickMedia chooses at play start (B = 0), and says why: among nodes that
-// meet the target, one no other session uses, so one dip hits one viewer,
-// then the primary, then the lowest RTT.
+// meet the target, the primary, then the lowest RTT.
 func (c *Controller) pickMedia(bitrate float64) (*nodes.Node, string) {
 	if n := c.pinned(c.cfg.Load().Pins.Media); n != nil {
 		return n, "pinned"
 	}
-	busy := c.busy()
 	o, ok := c.best(c.weigh(c.usable(nil), 0, bitrate, time.Now(), false), func(a, b option) int {
-		return cmp.Or(cmp.Compare(btoi(busy[a.n]), btoi(busy[b.n])),
-			cmp.Compare(btoi(a.n != c.primary), btoi(b.n != c.primary)), cmp.Compare(a.rtt, b.rtt))
+		return cmp.Or(cmp.Compare(btoi(a.n != c.primary), btoi(b.n != c.primary)), cmp.Compare(a.rtt, b.rtt))
 	})
 	switch {
 	case o.n == nil:
@@ -164,9 +163,6 @@ func (c *Controller) pickMedia(bitrate float64) (*nodes.Node, string) {
 	why := "lowest RTT that meets the target"
 	if o.n == c.primary {
 		why = "primary meets the target"
-	}
-	if busy[o.n] {
-		why += ", shared with another session"
 	}
 	return o.n, why
 }
@@ -189,10 +185,10 @@ func (s *Stream) Step(o Observation) *nodes.Node {
 	if s.delivered = o.Delivered; !s.leads() {
 		return nil
 	}
-	p.buffer, p.live, p.recent, p.full = o.buffer(), meanOf(o.Recent), slices.Clone(o.Recent), o.Full
+	p.buffer, p.full = o.buffer(), o.Full
 	now := time.Now()
 	stay := c.weighStay(p, now)
-	p.risk = stay.risk
+	p.risk, p.live = stay.risk, math.Exp(stay.rate.Mu)
 	if c.holds(p, stay, now) != "" {
 		return nil
 	}
@@ -200,41 +196,68 @@ func (s *Stream) Step(o Observation) *nodes.Node {
 	return n
 }
 
-// Explore picks a node to read the session's next stretch through, or nil:
-// a speed test whose bytes are played, and the only test Embolt runs. It
-// runs whenever the session can afford the test failing, at most once per
-// exploreGap: a test starts from a read-ahead at most half full, and if the
-// node delivers nothing for the whole stretch and the gaps of switching to
-// it and back, at least BufferMin must be left, from which the media node
-// still meets the target. Nodes are ranked by Thompson sampling, and the
-// first affordable one within the exit-IP cap is tested. The stream comes
-// back to the media node afterwards: a faster node is no reason to move a
-// session that meets its target, but it informs the next pick and failover.
-// Call it after Step, which updates the session's buffer.
+// Explore picks a node to test beside the session's media node, or nil: a
+// speed test whose bytes are dropped, and the only test Embolt runs. Tests
+// run one at a time, and only while the session's credit covers one; the
+// caller reports what it spent with Probed.
+//
+// A session that meets its target, with a fallback known to meet it from an
+// empty buffer, has nothing to learn and tests nothing. The fallback's
+// belief fades with half_life until it no longer passes, and tests resume.
+// Otherwise each usable node draws once from its rate posterior, and the
+// best node that out-draws the media node is tested. A
+// faster node is no reason to move a session that meets its target, but it
+// informs the next pick and failover.
+//
+// Call it after Step, which judges the media node.
 func (s *Stream) Explore() *nodes.Node {
 	p, c := s.Playback, s.c
-	cfg := c.cfg.Load()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()
-	if !s.leads() || now.Before(c.refused) ||
-		now.Sub(p.switched) < minSwitchGap || now.Sub(p.explored) < exploreGap ||
-		c.pinned(cfg.Pins.Media) == p.node || c.open(p.node) {
+	if !s.leads() {
 		return nil
 	}
-	rate := streamRate(cfg.Control, c.stats.StateAt(p.node, now).Rate, p.recent, now)
-	left := min(p.buffer, cfg.Control.ReadAhead/2) - ExploreStretch - c.switchGap(p.node)
-	unaffordable := func(n *nodes.Node) bool {
-		b := left - c.switchGap(n)
-		return b < BufferMin || stallRisk(rate, b, p.bitrate) > cfg.Control.StallRisk
-	}
-	n := c.firstWithinIPCap(slices.DeleteFunc(c.explorable(c.busy(), now), unaffordable), now)
-	if n == nil {
+	cfg := c.cfg.Load()
+	p.earn(cfg.Probes.Budget, now)
+	eps := cfg.Control.StallRisk
+	if c.probing || p.credit < ProbeBytes || now.Before(c.refused) || c.pinned(cfg.Pins.Media) == p.node ||
+		p.risk <= eps && slices.ContainsFunc(c.usable(func(n *nodes.Node) bool { return n != p.node }), func(n *nodes.Node) bool {
+			return stallRisk(c.stats.StateAt(n, now).Rate, 0, p.bitrate) <= eps
+		}) {
 		return nil
 	}
-	p.explored = now
-	slog.Debug("exploring", "session", p.key, "media", p.node.Name, "node", n.Name)
+	beliefs := map[*nodes.Node]measure.Belief{p.node: c.stats.StateAt(p.node, now).Rate}
+	for _, n := range c.usable(nil) {
+		beliefs[n] = c.stats.StateAt(n, now).Rate
+	}
+	n := byDraw(beliefs)[0]
+	if n == p.node {
+		return nil
+	}
+	c.probing = true
+	slog.Info("exploring", "session", p.key, "media", p.node.Name, "node", n.Name)
 	return n
+}
+
+// Probed ends the session's test, which spent the given bytes.
+func (s *Stream) Probed(spent int64) {
+	c := s.c
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.probing = false
+	s.credit -= float64(spent)
+}
+
+// earn adds the session's budget since it last earned: that share of the
+// bytes its bitrate plays meanwhile, whatever its node delivers, so a session
+// stuck on a slow node earns as fast as any. It holds at most two tests.
+func (p *Playback) earn(budget float64, now time.Time) {
+	if !p.earned.IsZero() {
+		p.credit += budget * p.bitrate * 1e6 / 8 * min(now.Sub(p.earned), earnGap).Seconds()
+	}
+	p.credit = min(p.credit, 2*ProbeBytes)
+	p.earned = now
 }
 
 // option is one node judged for a session.
@@ -261,13 +284,13 @@ func (c *Controller) best(opts []option, prefer func(a, b option) int) (option, 
 	return slices.MinFunc(opts, func(a, b option) int { return cmp.Or(cmp.Compare(a.stall, b.stall), prefer(a, b)) }), false
 }
 
-// weigh judges nodes by their beliefs at the session's buffer and bitrate.
+// weigh judges nodes by their rates now at the session's buffer and bitrate.
 // A switch delivers nothing for its gap g, so with moving set each node is
 // judged at B − g: that prices a move.
 func (c *Controller) weigh(ns []*nodes.Node, buffer time.Duration, bitrate float64, now time.Time, moving bool) []option {
 	opts := make([]option, 0, len(ns))
 	for _, n := range ns {
-		o := option{n: n, rate: c.stats.StateAt(n, now).Rate, rtt: c.rttKey(n)}
+		o := option{n: n, rate: c.stats.StateAt(n, now).Now, rtt: c.rttKey(n)}
 		if moving {
 			o.gap = c.switchGap(n)
 		}
@@ -277,12 +300,11 @@ func (c *Controller) weigh(ns []*nodes.Node, buffer time.Duration, bitrate float
 	return opts
 }
 
-// weighStay judges the media node at the session's buffer, by the stream's
-// own samples.
+// weighStay judges the media node at the session's buffer, by its rate now,
+// as weigh judges the nodes the session might move to.
 func (c *Controller) weighStay(p *Playback, now time.Time) option {
-	cfg := c.cfg.Load().Control
 	st := c.stats.StateAt(p.node, now)
-	stay := option{n: p.node, rate: streamRate(cfg, st.Rate, p.recent, now)}
+	stay := option{n: p.node, rate: st.Now}
 	switch {
 	case st.Open(now):
 		stay.risk, stay.stall = 1, expectedStall(measure.Belief{}, p.buffer, p.bitrate)
@@ -377,17 +399,6 @@ func (p *Playback) Switched(n *nodes.Node, reason string) {
 // byStall prefers the least expected stall, then the lowest RTT.
 func byStall(a, b option) int {
 	return cmp.Or(cmp.Compare(a.stall, b.stall), cmp.Compare(a.rtt, b.rtt))
-}
-
-func meanOf(xs []float64) float64 {
-	if len(xs) == 0 {
-		return 0
-	}
-	sum := 0.0
-	for _, x := range xs {
-		sum += x
-	}
-	return sum / float64(len(xs))
 }
 
 func round1(x float64) float64 { return math.Round(x*10) / 10 }

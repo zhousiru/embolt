@@ -195,7 +195,7 @@ func TestParseRange(t *testing.T) {
 // testSpan is a span that answered, holding [from, to) with reach handed to
 // players, which delivered recent bytes lately, as of at.
 func testSpan(f *file, from, to, reach int64, recent float64, at time.Time, connected bool) *span {
-	sp := &span{f: f, ready: true, from: from, base: from, to: to, end: -1, reach: reach,
+	sp := &span{f: f, ready: true, from: from, to: to, end: -1, reach: reach,
 		recent: recent, recentAt: at, opened: at, readers: map[*reader]struct{}{}, wake: make(chan struct{})}
 	if connected {
 		sp.readers[&reader{pos: reach}] = struct{}{}

@@ -80,11 +80,9 @@ type span struct {
 	ready   bool // the feed answered: header, total and end are known
 	dead    bool // no request may join: it failed, its file changed, or it was dropped
 	dropped bool // its bytes are released
-	done    bool // the feed has ended; err says why, if early
-	err     error
+	done    bool // the feed has ended
 
-	from   int64 // first byte held
-	base   int64 // offset of chunks[0]
+	from   int64 // first byte held: the offset of chunks[0]
 	chunks []*[chunkSize]byte
 	to     int64 // end of the bytes held: the feed's next byte
 	end    int64 // last byte the feed reads, -1 until known
@@ -171,7 +169,7 @@ func (f *file) open(rd *reader) *span {
 		}
 	}
 	now := time.Now()
-	sp := &span{f: f, total: -1, from: rd.pos, base: rd.pos, to: rd.pos, end: -1, reach: rd.pos,
+	sp := &span{f: f, total: -1, from: rd.pos, to: rd.pos, end: -1, reach: rd.pos,
 		readers: map[*reader]struct{}{}, opened: now, recentAt: now, wake: make(chan struct{})}
 	f.spans = append(f.spans, sp)
 	sp.attach(rd)
@@ -293,7 +291,7 @@ func (sp *span) append(b []byte) bool {
 		return false
 	}
 	for len(b) > 0 {
-		i, off := (sp.to-sp.base)/chunkSize, (sp.to-sp.base)%chunkSize
+		i, off := (sp.to-sp.from)/chunkSize, (sp.to-sp.from)%chunkSize
 		if int(i) == len(sp.chunks) {
 			sp.chunks = append(sp.chunks, chunks.Get().(*[chunkSize]byte))
 			sp.f.ra.hold(chunkSize)
@@ -308,7 +306,7 @@ func (sp *span) append(b []byte) bool {
 
 // at returns the held bytes from pos, within one chunk and up to last.
 func (sp *span) at(pos, last int64) []byte {
-	i, off := (pos-sp.base)/chunkSize, (pos-sp.base)%chunkSize
+	i, off := (pos-sp.from)/chunkSize, (pos-sp.from)%chunkSize
 	n := min(chunkSize-off, sp.to-pos)
 	if last >= 0 {
 		n = min(n, last-pos+1)
@@ -342,13 +340,12 @@ func (sp *span) trim() {
 		low = min(low, m.pos)
 	}
 	ra := sp.f.ra
-	for len(sp.chunks) > 0 && sp.base+chunkSize <= low-keepBehind {
+	for len(sp.chunks) > 0 && sp.from+chunkSize <= low-keepBehind {
 		chunks.Put(sp.chunks[0])
 		sp.chunks = sp.chunks[1:]
-		sp.base += chunkSize
+		sp.from += chunkSize
 		ra.hold(-chunkSize)
 	}
-	sp.from = max(sp.from, sp.base)
 }
 
 func (sp *span) decayed(now time.Time) float64 {
@@ -479,8 +476,8 @@ func (f *file) media(bytes int64) time.Duration {
 }
 
 // supervise runs the controller step for the file every 2 s while a region
-// of it is being played. A switch moves every feed; an exploration reads
-// through the main read's feed.
+// of it is being played. A switch moves every feed; a test reads past the
+// main read's window, beside it.
 func (f *file) supervise(ctx context.Context) {
 	tick := time.NewTicker(stepEvery)
 	defer tick.Stop()
@@ -506,24 +503,24 @@ func (f *file) supervise(ctx context.Context) {
 		play := f.play
 		ra.mu.Unlock()
 		for _, fd := range feeds {
-			if full, recent := fd.meter.take(); fd == mf {
-				obs.Full, obs.Recent = full, recent
+			if full := fd.meter.full(); fd == mf {
+				obs.Full = full
 			}
 		}
-		if mf == nil || play == nil || mf.exploring.Load() {
-			continue // nothing played, or the media node is not reading: nothing to judge
+		if mf == nil || play == nil {
+			continue // nothing played: nothing to judge
 		}
 		if n := play.Step(obs); n != nil {
 			for _, fd := range feeds {
-				fd.redirect(func() error { return switchTo{n} })
+				fd.redirect(switchTo{n})
 			}
-		} else {
-			mf.redirect(func() error {
-				if n := play.Explore(); n != nil {
-					return exploreOn{n}
-				}
-				return nil
-			})
+			continue
+		}
+		if n := play.Explore(); n != nil {
+			ra.mu.Lock()
+			t := f.test(main)
+			ra.mu.Unlock()
+			go t.run(ctx, play, n)
 		}
 	}
 }
@@ -695,7 +692,8 @@ func (s *Server) outbound(r *http.Request, target *url.URL) *http.Request {
 }
 
 // passThrough sends a request Embolt cannot answer from a span to upstream
-// as it is, on the session's media node, and relays the answer.
+// as it is, on the session's media node, and relays the answer. A node that
+// cannot connect is failed over, at most maxAttempts tries in all.
 func (s *Server) passThrough(w http.ResponseWriter, req *http.Request, key string, mbps float64) {
 	play, err := s.ctrl.Play(key, mbps)
 	if err != nil {
@@ -705,7 +703,11 @@ func (s *Server) passThrough(w http.ResponseWriter, req *http.Request, key strin
 	defer play.Release()
 	defer play.Watch()()
 	ctx := req.Context()
-	for n := play.Node(); n != nil; n = play.Failover(n) {
+	n := play.Node()
+	for range maxAttempts {
+		if n == nil {
+			break
+		}
 		resp, err := s.fetch(n, req.Clone(ctx))
 		s.observe(ctx, n, err)
 		if err == nil {
@@ -715,6 +717,7 @@ func (s *Server) passThrough(w http.ResponseWriter, req *http.Request, key strin
 		if ctx.Err() != nil {
 			return
 		}
+		n = play.Failover(n)
 	}
 	http.Error(w, "embolt: no node could open the stream", http.StatusBadGateway)
 }

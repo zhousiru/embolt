@@ -55,12 +55,6 @@ func (o *outbound) DialContext(ctx context.Context, network, addr string) (net.C
 
 func (o *outbound) Close() error { return o.p.Close() }
 
-// lookupServer resolves a node's server the way its outbound will when it
-// dials, so diversity keys match the addresses actually used.
-func lookupServer(ctx context.Context, host string) ([]netip.Addr, error) {
-	return resolver.LookupIPWithResolver(ctx, host, resolver.ProxyServerHostResolver)
-}
-
 // UseDNS points mihomo's resolver for node servers at c's nameservers; an
 // empty c leaves mihomo on the OS's servers.
 func UseDNS(c config.DNS) error {

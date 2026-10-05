@@ -20,26 +20,21 @@ const catalogCap = 4096
 var reDeviceID = regexp.MustCompile(`(?i)DeviceId="([^"]*)"`)
 
 // catalog remembers what PlaybackInfo told the player: each media source's
-// bitrate and size, its stream paths, and any separate stream hosts.
+// bitrate, its stream paths, and any separate stream hosts.
 type catalog struct {
 	mu      sync.Mutex
-	sources map[string]source // by MediaSourceId
-	items   map[string]source // by item ID, the first source
-	streams map[string]bool   // lower-cased stream paths
-	hosts   map[string]bool   // stream hosts the proxy may reach
-	details map[string]item   // by item ID, from the item's details
-	owners  map[string]string // item ID by MediaSourceId
-}
-
-type source struct {
-	mbps float64
-	size int64
+	sources map[string]float64 // Mbps by MediaSourceId
+	items   map[string]float64 // Mbps by item ID, of its first source
+	streams map[string]bool    // lower-cased stream paths
+	hosts   map[string]bool    // stream hosts the proxy may reach
+	details map[string]item    // by item ID, from the item's details
+	owners  map[string]string  // item ID by MediaSourceId
 }
 
 func newCatalog() *catalog {
 	return &catalog{
-		sources: map[string]source{},
-		items:   map[string]source{},
+		sources: map[string]float64{},
+		items:   map[string]float64{},
 		streams: map[string]bool{},
 		hosts:   map[string]bool{},
 		details: map[string]item{},
@@ -79,10 +74,10 @@ func (c *catalog) session(r *http.Request) (key string, mbps float64) {
 	key = deviceID(r) + "/" + cmp.Or(item, src)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if s, ok := c.sources[src]; ok {
-		return key, s.mbps
+	if mbps, ok := c.sources[src]; ok {
+		return key, mbps
 	}
-	return key, c.items[item].mbps
+	return key, c.items[item]
 }
 
 func deviceID(r *http.Request) string {
@@ -128,8 +123,7 @@ func (s *Server) playbackInfo(resp *http.Response, item string) error {
 			continue
 		}
 		bitrate, _ := ms["Bitrate"].(float64)
-		size, _ := ms["Size"].(float64)
-		src := source{mbps: bitrate / 1e6, size: int64(size)}
+		src := bitrate / 1e6
 		if id, _ := ms["Id"].(string); id != "" {
 			c.sources[id] = src
 			c.owners[id] = item

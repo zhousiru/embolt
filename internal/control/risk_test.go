@@ -52,25 +52,26 @@ func TestStallRisk(t *testing.T) {
 	}
 }
 
-// TestStreamRateSeesASag replays the first switch of the 2026-10-05 test: a
+// TestRateNowSeesASag replays the first switch of the 2026-10-05 test: a
 // node believed fast, whose stream fell from 9 to 1.3 Mbps on a 5.1 Mbps
-// video with a nearly empty buffer. Its own samples must override the belief.
-func TestStreamRateSeesASag(t *testing.T) {
+// video with a nearly empty buffer. Its recent samples must override the
+// belief.
+func TestRateNowSeesASag(t *testing.T) {
 	p := config.Default().Control
-	now := time.Now()
-	node := measure.NewBelief(math.Log(80), 0.3, 200)
-	fine := streamRate(p, node, []float64{60, 70, 65}, now)
-	sagging := streamRate(p, node, []float64{9.0, 6.3, 4.7, 1.3}, now)
-	if r := stallRisk(fine, 5*time.Second, 5.1); r > p.StallRisk {
-		t.Errorf("healthy stream: risk %.4f, want under target", r)
-	}
-	if r := stallRisk(sagging, 5*time.Second, 5.1); r <= p.StallRisk {
-		t.Errorf("sagging stream: risk %.4f, want over target so the controller acts", r)
-	}
-	// No samples yet is no news: the stream is judged by the node's belief,
+	fast := cycle(40, 70, 80, 90)
+	c, n := testController(t, map[string][]float64{"a": fast, "b": fast})
+	// No samples lately is no news: the node is judged by its typical rate,
 	// as calmly as any other node. This stopped the 15:11 flapping.
-	if r := stallRisk(streamRate(p, node, nil, now), 20*time.Second, 5.3); r > p.StallRisk/100 {
-		t.Errorf("stream without samples on a fast node: risk %.4f, want ≈ 0", r)
+	if r := stallRisk(c.stats.State(n["a"]).Now, 20*time.Second, 5.3); r > p.StallRisk/100 {
+		t.Errorf("fast node without recent samples: risk %.4f, want ≈ 0", r)
+	}
+	record(c.stats, n["a"], 0, 60, 70, 65)
+	record(c.stats, n["b"], 0, 9.0, 6.3, 4.7, 1.3)
+	if r := stallRisk(c.stats.State(n["a"]).Now, 5*time.Second, 5.1); r > p.StallRisk {
+		t.Errorf("healthy node: risk %.4f, want under target", r)
+	}
+	if r := stallRisk(c.stats.State(n["b"]).Now, 5*time.Second, 5.1); r <= p.StallRisk {
+		t.Errorf("sagging node: risk %.4f, want over target so the controller acts", r)
 	}
 }
 

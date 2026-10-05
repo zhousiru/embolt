@@ -14,7 +14,8 @@ through the [mihomo](https://github.com/metacubex/mihomo) node best suited to it
 Nodes rank themselves from real traffic to your Emby server. Each node holds
 a learned belief about its rate and RTT; one controller keeps the predicted
 probability of a stall under 1%, and moves a session only when it must, so
-each playback keeps one exit IP whenever possible.
+each playback reads through one exit IP whenever possible, plus a second for
+the few seconds of a speed test.
 
 Embolt is not affiliated with Emby LLC, and it is not a tool for evading a
 server's rules on IPs, streams or downloads.
@@ -52,15 +53,20 @@ under 1%: stay, or switch to the best other node. No byte
 for 4 s, or a connection error, fails over at once.
 
 Rates are learned from playback alone. Every stream samples its media node,
-and a session explores, at most once a minute, whenever it can afford a test
-that fails: from a read-ahead at most half full, the next stretch (up to 8 s,
-or until it is full) is read through another node, then the stream resumes
-on its media node at the next byte. It can afford one when, losing the whole
-stretch and the gaps of switching there and back, it would still hold 10 s and
-its media node keep the stall risk under 1%. The node is picked by Thompson
-sampling, one draw from each node's rate posterior, so barely measured nodes
-that may be fast are tried first, known fallbacks stay fresh, and known slow
-nodes are left alone. A test costs no extra bytes and no second connection.
+and a session tests other nodes beside it: while its media node keeps
+reading, another node reads the stretch just past the read-ahead, up to
+32 MB for up to 8 s, and its bytes are dropped. A node that fails the test
+costs the session nothing. A session that meets its target, with another
+node known to meet it from an empty buffer, tests nothing; as that node's
+belief fades, it stops counting and tests resume. Otherwise each node draws
+once from its rate posterior (Thompson sampling), and a node that out-draws
+the media node is tested, so barely measured nodes that may be fast are
+tried first, known fallbacks stay fresh, and known slow nodes are left
+alone. One test runs at a time, within
+a budget: a session earns `probes.budget` (5%) of its bitrate while it
+plays, whatever its node delivers, so a session stuck on a slow node may
+test as often as any, and tests of slow nodes cost fewer bytes. A test costs
+a second connection, through a second exit IP.
 `embolt replay` runs the model over the logged samples and reports
 how well calibrated it is, to tune `half_life` and `prior_strength` on your
 own data:

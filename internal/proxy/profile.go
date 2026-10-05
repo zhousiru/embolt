@@ -781,16 +781,6 @@ func page(q url.Values) (start, limit int) {
 	return max(start, 0), max(limit, 0)
 }
 
-// qget reads a parameter case-insensitively, as Emby does.
-func qget(q url.Values, key string) string {
-	for k, v := range q {
-		if strings.EqualFold(k, key) && len(v) > 0 {
-			return v[0]
-		}
-	}
-	return ""
-}
-
 func qdel(q url.Values, keys ...string) {
 	for k := range q {
 		if slices.ContainsFunc(keys, func(key string) bool { return strings.EqualFold(k, key) }) {

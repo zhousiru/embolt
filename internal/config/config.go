@@ -102,10 +102,10 @@ type Control struct {
 	ReadAhead     time.Duration `yaml:"read_ahead"`
 }
 
-// Probes tune exploration, the only speed test: with a full read-ahead, a
-// session reads its next stretch through another node.
+// Probes tune exploration, the only speed test: a session reads a stretch
+// of its file through another node, beside its media node, and drops it.
 type Probes struct {
-	MaxNewIPsPerHour int `yaml:"max_new_ips_per_hour"`
+	Budget float64 `yaml:"budget"` // share of a session's bitrate spent on tests; 0 turns them off
 }
 
 // Pins name a node (by name or ID) that overrides the controller for a role.
@@ -139,7 +139,7 @@ func Default() *Config {
 			PriorStrength: 2,
 			ReadAhead:     60 * time.Second,
 		},
-		Probes:  Probes{MaxNewIPsPerHour: 8},
+		Probes:  Probes{Budget: 0.05},
 		Cache:   Cache{SizeMB: 2048},
 		Web:     Web{Listen: ":9090"},
 		DataDir: "/data",
@@ -193,6 +193,7 @@ func (c *Config) validate() error {
 	check(k.StallRisk > 0 && k.StallRisk < 1, "control.stall_risk: want (0, 1)")
 	check(k.HalfLife > 0 && k.ReadAhead > 0, "control: durations must be positive")
 	check(k.PriorStrength > 0, "control: prior_strength must be positive")
+	check(c.Probes.Budget >= 0 && c.Probes.Budget < 1, "probes.budget: want [0, 1)")
 	check((c.TLS.Listen == "") == (c.TLS.Cert == "") && (c.TLS.Cert == "") == (c.TLS.Key == ""),
 		"tls: set listen, cert and key together")
 	return errors.Join(errs...)
