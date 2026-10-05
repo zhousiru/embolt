@@ -156,6 +156,35 @@ func TestPrimaryWeighsSpeed(t *testing.T) {
 	}
 }
 
+// TestPrimaryMovesOnlyWhenSureAndIdle: a node clearly quicker takes over
+// after a ping round, but not while something plays.
+func TestPrimaryMovesOnlyWhenSureAndIdle(t *testing.T) {
+	c, n := testController(t, map[string][]float64{"a": {40, 42, 38, 40}})
+	ping := func(name string, rtt time.Duration) {
+		for range 4 {
+			c.stats.Record(n[name], measure.Sample{Kind: measure.KindPing, TTFB: rtt})
+		}
+	}
+	ping("a", 80*time.Millisecond)
+	if got, _ := c.Primary(); got != n["a"] {
+		t.Fatalf("primary %v, want a, the only measured node", got)
+	}
+	for _, r := range []float64{200, 210, 190, 205, 195, 200} {
+		c.stats.Record(n["b"], measure.Sample{Kind: measure.KindPassive, Bytes: int64(r * 1e6 / 8 * 2), Dur: measure.Window})
+	}
+	ping("b", 30*time.Millisecond)
+	s, _ := c.Play("tv/1", 10)
+	c.reconsiderPrimary()
+	if c.primary != n["a"] {
+		t.Errorf("primary moved to %v during playback", c.primary)
+	}
+	s.Release()
+	c.reconsiderPrimary()
+	if c.primary != n["b"] {
+		t.Errorf("primary %v once idle, want b (a %.0f ms, b %.0f ms)", c.primary, c.burst(n["a"]).mean, c.burst(n["b"]).mean)
+	}
+}
+
 // TestSessionShowsTheStepsChoice: the session view must judge nodes as Step
 // does, and say why it stays or moves.
 func TestSessionShowsTheStepsChoice(t *testing.T) {

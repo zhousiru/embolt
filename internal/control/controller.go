@@ -27,7 +27,6 @@ import (
 const (
 	primaryMargin = 100 * time.Millisecond // on a burst, see burstTime
 	primaryConf   = 0.95
-	primaryRounds = 2
 	activeWindow  = 10 * time.Minute
 	playLinger    = 2 * time.Minute // keeps a session's nodes across seeks
 	firstRunMbps  = 40.0            // the bitrate to judge at before any session reports one
@@ -48,15 +47,13 @@ type Controller struct {
 
 	lastActive atomic.Int64
 
-	mu         sync.Mutex
-	primary    *nodes.Node
-	challenger *nodes.Node
-	wins       int
-	plays      map[string]*Playback
-	refused    time.Time            // exploration paused until
-	tested     map[string]time.Time // node ID → last explored, for the exit-IP cap
-	peak       float64              // highest bitrate played within peakMemory
-	peakAt     time.Time
+	mu      sync.Mutex
+	primary *nodes.Node
+	plays   map[string]*Playback
+	refused time.Time            // exploration paused until
+	tested  map[string]time.Time // node ID → last explored, for the exit-IP cap
+	peak    float64              // highest bitrate played within peakMemory
+	peakAt  time.Time
 }
 
 func New(cfg *config.Store, pool *nodes.Pool, stats *measure.Stats) *Controller {
@@ -147,12 +144,12 @@ func (c *Controller) setPrimary(n *nodes.Node) {
 	if n != nil && n != c.primary {
 		slog.Info("primary switched", "from", c.primary, "to", n.Name)
 	}
-	c.primary, c.challenger, c.wins = n, nil, 0
+	c.primary = n
 }
 
-// reconsiderPrimary runs after each ping round. A challenger takes over only
-// when P(its burst is 100 ms quicker) ≥ 95% for 2 rounds and nothing is
-// playing.
+// reconsiderPrimary runs after each ping round. Another node takes over only
+// when P(its burst is 100 ms quicker) ≥ 95% and nothing is playing: the
+// beliefs' own doubt is the hysteresis.
 func (c *Controller) reconsiderPrimary() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -161,14 +158,7 @@ func (c *Controller) reconsiderPrimary() {
 		return
 	}
 	best := c.quickest(c.usable(func(n *nodes.Node) bool { return n != c.primary }))
-	if best == nil || probFaster(c.burst(best), c.burst(c.primary), primaryMargin) < primaryConf {
-		c.challenger, c.wins = nil, 0
-		return
-	}
-	if best != c.challenger {
-		c.challenger, c.wins = best, 0
-	}
-	if c.wins++; c.wins >= primaryRounds && len(c.busy()) == 0 {
+	if best != nil && len(c.busy()) == 0 && probFaster(c.burst(best), c.burst(c.primary), primaryMargin) >= primaryConf {
 		c.setPrimary(best)
 	}
 }
