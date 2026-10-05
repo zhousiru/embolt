@@ -35,6 +35,11 @@ proxy-providers:
 #   half_life: 2h           # how fast old measurements fade
 #   prior_strength: 2       # a new node's prior, in samples; check both with `embolt replay`
 
+# profile: upstream         # "local": progress, played, favorites, likes and
+#                           # preferences stay in data_dir/profile.json, so people
+#                           # sharing one account each keep their own. Marks are
+#                           # never sent; playback reports are, unchanged.
+
 # probes:
 #   max_new_ips_per_hour: 8 # distinct nodes explored on your token per hour
 

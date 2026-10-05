@@ -32,7 +32,16 @@ type Config struct {
 	Cache   Cache   `yaml:"cache"`
 	Web     Web     `yaml:"web"`
 	DataDir string  `yaml:"data_dir"`
+
+	// Profile is where the user's watch state, favorites and preferences
+	// live: "upstream" on the server's account, or "local" in
+	// data_dir/profile.json, so deployments sharing one account each keep
+	// their own.
+	Profile string `yaml:"profile"`
 }
+
+// LocalProfile reports whether user data stays in this deployment.
+func (c *Config) LocalProfile() bool { return c.Profile == "local" }
 
 type TLS struct {
 	Listen string `yaml:"listen"`
@@ -134,6 +143,7 @@ func Default() *Config {
 		Cache:   Cache{SizeMB: 2048},
 		Web:     Web{Listen: ":9090"},
 		DataDir: "/data",
+		Profile: "upstream",
 	}
 }
 
@@ -168,6 +178,7 @@ func (c *Config) validate() error {
 		errs = append(errs, fmt.Errorf("upstream.url: want an absolute URL, got %q", u.URL))
 	}
 	check(u.Redirect == "follow" || u.Redirect == "pass", "upstream.redirect: want follow or pass, got %q", u.Redirect)
+	check(c.Profile == "upstream" || c.Profile == "local", "profile: want upstream or local, got %q", c.Profile)
 	check(len(c.Providers)+len(c.Proxies) > 0, "no nodes: set proxy-providers or proxies")
 	for name, p := range c.Providers {
 		check(p.Type == "http" && p.URL != "" || p.Type == "file" && p.Path != "",

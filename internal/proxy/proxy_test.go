@@ -19,6 +19,7 @@ import (
 	"github.com/zhousiru/embolt/internal/control"
 	"github.com/zhousiru/embolt/internal/measure"
 	"github.com/zhousiru/embolt/internal/nodes"
+	"github.com/zhousiru/embolt/internal/profile"
 )
 
 func TestClassify(t *testing.T) {
@@ -105,23 +106,23 @@ func TestFailoverMidStream(t *testing.T) {
 	}
 }
 
-func newTestProxy(t *testing.T, upstream string) *httptest.Server {
+func newTestProxy(t *testing.T, upstream string, extra ...string) *httptest.Server {
 	t.Helper()
-	s, _ := newTestServer(t, upstream)
+	s, _ := newTestServer(t, upstream, extra...)
 	srv := httptest.NewServer(s)
 	t.Cleanup(srv.Close)
 	return srv
 }
 
-// newTestServer has two direct nodes, a and b.
-func newTestServer(t *testing.T, upstream string) (*Server, *nodes.Pool) {
+// newTestServer has two direct nodes, a and b; extra lines add to its config.
+func newTestServer(t *testing.T, upstream string, extra ...string) (*Server, *nodes.Pool) {
 	t.Helper()
 	// Two direct nodes; udp differs only to give them distinct IDs.
 	cfg := mustParse(t, upstream, `
 proxies:
   - {name: a, type: direct, udp: false}
   - {name: b, type: direct, udp: true}
-data_dir: `+t.TempDir())
+data_dir: `+t.TempDir()+"\n"+strings.Join(extra, "\n"))
 	store := config.Static(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -134,7 +135,8 @@ data_dir: `+t.TempDir())
 	}
 	stats := measure.NewStats(store, "")
 	ctrl := control.New(store, pool, stats)
-	return New(store, ctrl, stats, cache.Open(t.TempDir(), 1<<20)), pool
+	p, _ := profile.Open("")
+	return New(store, ctrl, stats, cache.Open(t.TempDir(), 1<<20), p), pool
 }
 
 func mustParse(t *testing.T, upstream, extra string) *config.Config {

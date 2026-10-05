@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/zhousiru/embolt/internal/profile"
 )
 
 const catalogCap = 4096
@@ -49,6 +51,13 @@ func (c *catalog) isStream(path string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.streams[strings.ToLower(path)]
+}
+
+// owner is the item a MediaSourceId belongs to, if PlaybackInfo named it.
+func (c *catalog) owner(src string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.owners[src]
 }
 
 func (c *catalog) allowsHost(host string) bool {
@@ -124,6 +133,9 @@ func (s *Server) playbackInfo(resp *http.Response, item string) error {
 		if id, _ := ms["Id"].(string); id != "" {
 			c.sources[id] = src
 			c.owners[id] = item
+		}
+		if t, _ := ms["RunTimeTicks"].(float64); t > 0 {
+			s.profile.Learn(itemID(item), profile.Meta{Runtime: int64(t)})
 		}
 		if i == 0 {
 			c.items[item] = src

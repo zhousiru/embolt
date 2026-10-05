@@ -1,10 +1,8 @@
 package proxy
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -32,20 +30,10 @@ func (s *Server) itemDetails(resp *http.Response) error {
 	if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Encoding") != "" {
 		return nil
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxDetails+1))
-	if err != nil {
-		resp.Body.Close()
+	raw, ok, err := peek(resp, maxDetails)
+	if !ok {
 		return err
 	}
-	if len(raw) > maxDetails {
-		resp.Body = struct {
-			io.Reader
-			io.Closer
-		}{io.MultiReader(bytes.NewReader(raw), resp.Body), resp.Body}
-		return nil
-	}
-	resp.Body.Close()
-	resp.Body = io.NopCloser(bytes.NewReader(raw))
 
 	var d struct {
 		ID                    string `json:"Id"`

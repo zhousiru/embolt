@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	"github.com/zhousiru/embolt/internal/control"
 	"github.com/zhousiru/embolt/internal/measure"
 	"github.com/zhousiru/embolt/internal/nodes"
+	"github.com/zhousiru/embolt/internal/profile"
 	"github.com/zhousiru/embolt/internal/proxy"
 	"github.com/zhousiru/embolt/internal/webapi"
 	"github.com/zhousiru/embolt/web"
@@ -53,7 +55,11 @@ func serve(args []string) error {
 	pool := nodes.NewPool(store)
 	stats := measure.NewStats(store, filepath.Join(cfg.DataDir, "samples"))
 	ctrl := control.New(store, pool, stats)
-	px := proxy.New(store, ctrl, stats, cache.Open(filepath.Join(cfg.DataDir, "cache"), cfg.Cache.SizeMB<<20))
+	prof, err := profile.Open(filepath.Join(cfg.DataDir, "profile.json"))
+	if err != nil {
+		return fmt.Errorf("profile: %w", err)
+	}
+	px := proxy.New(store, ctrl, stats, cache.Open(filepath.Join(cfg.DataDir, "cache"), cfg.Cache.SizeMB<<20), prof)
 	pane := webapi.New(webapi.Deps{
 		Cfg: store, Ctrl: ctrl, Journal: journal, UI: web.UI(),
 		Version: version, Started: time.Now(), Items: px,
@@ -66,6 +72,7 @@ func serve(args []string) error {
 	g.Go(func() error { pool.Run(ctx); return nil })
 	g.Go(func() error { ctrl.Run(ctx); return nil })
 	g.Go(func() error { stats.Persist(ctx, filepath.Join(cfg.DataDir, "beliefs.json")); return nil })
+	g.Go(func() error { prof.Persist(ctx); return nil })
 
 	listen(ctx, g, "ingress", cfg.Listen, px, "", "")
 	if cfg.TLS.Listen != "" {

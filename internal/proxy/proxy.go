@@ -22,6 +22,7 @@ import (
 	"github.com/zhousiru/embolt/internal/control"
 	"github.com/zhousiru/embolt/internal/measure"
 	"github.com/zhousiru/embolt/internal/nodes"
+	"github.com/zhousiru/embolt/internal/profile"
 )
 
 // remotePrefix routes to a separate stream host learned from PlaybackInfo:
@@ -35,12 +36,13 @@ type Server struct {
 	ctrl    *control.Controller
 	stats   *measure.Stats
 	cache   *cache.Cache
+	profile *profile.Store // used with profile: local
 	catalog *catalog
 	links   links
 	rp      *httputil.ReverseProxy
 }
 
-func New(cfg *config.Store, ctrl *control.Controller, stats *measure.Stats, c *cache.Cache) *Server {
+func New(cfg *config.Store, ctrl *control.Controller, stats *measure.Stats, c *cache.Cache, p *profile.Store) *Server {
 	base := cfg.Load().Upstream.Base()
 	s := &Server{
 		cfg:     cfg,
@@ -49,6 +51,7 @@ func New(cfg *config.Store, ctrl *control.Controller, stats *measure.Stats, c *c
 		ctrl:    ctrl,
 		stats:   stats,
 		cache:   c,
+		profile: p,
 		catalog: newCatalog(),
 		links:   links{m: map[string]link{}},
 	}
@@ -75,6 +78,9 @@ type routeKey struct{}
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.ctrl.Touch()
+	if s.local() && s.serveProfile(w, r) {
+		return
+	}
 	rt := &route{lane: s.classify(r), target: s.base}
 	if rest, ok := strings.CutPrefix(r.URL.Path, remotePrefix); ok {
 		scheme, rest, _ := strings.Cut(rest, "/")
@@ -131,8 +137,12 @@ func (s *Server) rewrite(pr *httputil.ProxyRequest) {
 	rt := routeOf(pr.In)
 	pr.SetURL(rt.target)
 	s.fixHeaders(pr.Out.Header, rt.target)
-	if reInfo.MatchString(pr.In.URL.Path) || reDetails.MatchString(pr.In.URL.Path) || rt.lane == laneHLS {
+	local := s.local() && rt.lane == laneControl && rt.cacheKey == ""
+	if local || reInfo.MatchString(pr.In.URL.Path) || reDetails.MatchString(pr.In.URL.Path) || rt.lane == laneHLS {
 		pr.Out.Header.Del("Accept-Encoding") // bodies we rewrite must arrive plain
+	}
+	if local && isWebsocket(pr.Out.Header) {
+		pr.Out.Header.Del("Sec-Websocket-Extensions") // frames we edit must arrive uncompressed
 	}
 }
 
@@ -159,6 +169,13 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		}
 	}
 	path := resp.Request.URL.Path
+	if s.local() && rt.lane == laneControl && rt.cacheKey == "" {
+		if conn, ok := resp.Body.(io.ReadWriteCloser); ok && resp.StatusCode == http.StatusSwitchingProtocols {
+			resp.Body = newWSFilter(conn, s.userDataMessage)
+		} else if err := s.overlayResponse(resp); err != nil {
+			return err
+		}
+	}
 	switch {
 	case rt.cacheKey != "":
 		s.cache.Store(rt.cacheKey, resp, query(resp.Request.URL, "tag") != "")
