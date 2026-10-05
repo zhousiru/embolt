@@ -321,11 +321,6 @@ func (c *Controller) pinned(ref string) *nodes.Node {
 	return nil
 }
 
-// lowestRTT ranks by the 90% upper bound of the typical RTT.
-func (c *Controller) lowestRTT(ns []*nodes.Node) *nodes.Node {
-	return minBy(c.rttMeasured(ns), c.rttKey)
-}
-
 // quickest ranks by the 90% upper bound of the burst time. A node with no
 // speed data keeps a wide pooled prior, so it ranks behind a measured node of
 // the same speed.
@@ -349,8 +344,15 @@ func (c *Controller) burst(n *nodes.Node) timing {
 }
 
 // rttKey is the 90% upper bound of a node's typical RTT: low only when the
-// node is both fast and well measured.
-func (c *Controller) rttKey(n *nodes.Node) float64 { return c.stats.State(n).RTT.Mean().Quantile(0.9) }
+// node is both fast and well measured. Unmeasured, it ranks last, so a guess
+// never beats a measurement.
+func (c *Controller) rttKey(n *nodes.Node) float64 {
+	rtt := c.stats.State(n).RTT
+	if !rtt.Measured() {
+		return math.Inf(1)
+	}
+	return rtt.Mean().Quantile(0.9)
+}
 
 func minBy[T any](xs []T, key func(T) float64) T {
 	var best T

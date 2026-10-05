@@ -125,31 +125,32 @@ func (p *Playback) Bitrate() float64 {
 	return p.bitrate
 }
 
-// pickMedia chooses at play start (B = 0), and says why: the primary if it
-// passes, else the lowest-RTT node that passes, else the lowest risk. A second
-// session avoids the first one's node when another passes, so one dip hits
-// one viewer.
+// pickMedia chooses at play start (B = 0), and says why: among nodes that
+// meet the target, one no other session uses, so one dip hits one viewer,
+// then the primary, then the lowest RTT.
 func (c *Controller) pickMedia(bitrate float64) (*nodes.Node, string) {
 	if n := c.pinned(c.cfg.Load().Pins.Media); n != nil {
 		return n, "pinned"
 	}
 	busy := c.busy()
-	free := c.usable(func(n *nodes.Node) bool { return !busy[n] })
-	all := c.usable(nil)
-	for i, cands := range [][]*nodes.Node{free, all} {
-		shared := ""
-		if i > 0 {
-			shared = ", shared with another session"
-		}
-		passing := c.passing(cands, 0, bitrate)
-		if c.primary != nil && slices.Contains(passing, c.primary) {
-			return c.primary, "primary meets the target" + shared
-		}
-		if n := c.lowestRTT(passing); n != nil {
-			return n, "lowest RTT that meets the target" + shared
-		}
+	o, ok := c.best(c.weigh(c.usable(nil), 0, bitrate, time.Now(), false), func(a, b option) int {
+		return cmp.Or(cmp.Compare(btoi(busy[a.n]), btoi(busy[b.n])),
+			cmp.Compare(btoi(a.n != c.primary), btoi(b.n != c.primary)), cmp.Compare(a.rtt, b.rtt))
+	})
+	switch {
+	case o.n == nil:
+		return nil, ""
+	case !ok:
+		return o.n, "least expected stall; none meets the target"
 	}
-	return c.leastRisk(all, 0, bitrate), "least risk; none meets the target"
+	why := "lowest RTT that meets the target"
+	if o.n == c.primary {
+		why = "primary meets the target"
+	}
+	if busy[o.n] {
+		why += ", shared with another session"
+	}
+	return o.n, why
 }
 
 // Step is the controller loop for one session, called every 2 s by each of
@@ -177,7 +178,7 @@ func (s *Stream) Step(o Observation) *nodes.Node {
 	if c.holds(p, stay, now) != "" {
 		return nil
 	}
-	n, _ := c.choose(stay, c.weighMoves(p, c.standbyFor(p), now))
+	n, _ := c.choose(stay, c.moves(p, now), c.standbyFor(p))
 	return n
 }
 
@@ -211,14 +212,44 @@ func (s *Stream) Explore(o Observation) *nodes.Node {
 	return n
 }
 
-// option is one action the step weighs.
+// option is one node judged for a session.
 type option struct {
 	n           *nodes.Node
 	rate        measure.Belief // as judged
 	gap         time.Duration  // of a switch
 	risk, stall float64        // p_stall and expected stall seconds over the horizon
-	notStandby  bool
-	rtt         float64
+	rtt         float64        // the tie-break, see rttKey
+}
+
+// best is the one rule behind every node choice, a chance-constrained step:
+// among the options that meet the target ε, the first by prefer; when none
+// does, the least expected stall, ties to prefer. It reports whether the
+// pick meets ε. With no options, the pick has no node.
+func (c *Controller) best(opts []option, prefer func(a, b option) int) (option, bool) {
+	if len(opts) == 0 {
+		return option{}, false
+	}
+	eps := c.cfg.Load().Control.StallRisk
+	if passing := slices.DeleteFunc(slices.Clone(opts), func(o option) bool { return o.risk > eps }); len(passing) > 0 {
+		return slices.MinFunc(passing, prefer), true
+	}
+	return slices.MinFunc(opts, func(a, b option) int { return cmp.Or(cmp.Compare(a.stall, b.stall), prefer(a, b)) }), false
+}
+
+// weigh judges nodes by their beliefs at the session's buffer and bitrate.
+// A switch delivers nothing for its gap g, so with moving set each node is
+// judged at B − g: that prices a move.
+func (c *Controller) weigh(ns []*nodes.Node, buffer time.Duration, bitrate float64, now time.Time, moving bool) []option {
+	opts := make([]option, 0, len(ns))
+	for _, n := range ns {
+		o := option{n: n, rate: c.stats.StateAt(n, now).Rate, rtt: c.rttKey(n)}
+		if moving {
+			o.gap = c.switchGap(n)
+		}
+		o.risk, o.stall = stallRisk(o.rate, buffer-o.gap, bitrate), expectedStall(o.rate, buffer-o.gap, bitrate)
+		opts = append(opts, o)
+	}
+	return opts
 }
 
 // weighStay judges the media node at the session's buffer, by the stream's
@@ -226,14 +257,11 @@ type option struct {
 func (c *Controller) weighStay(p *Playback, now time.Time) option {
 	cfg := c.cfg.Load().Control
 	st := c.stats.StateAt(p.node, now)
-	stay := option{n: p.node, rate: st.Rate}
+	stay := option{n: p.node, rate: streamRate(cfg, st.Rate, p.recent, now)}
 	switch {
 	case st.Open(now):
 		stay.risk, stay.stall = 1, expectedStall(measure.Belief{}, p.buffer, p.bitrate)
-	case p.full: // the node has shown it keeps up: nothing to predict
-		stay.rate = streamRate(cfg, st.Rate, p.recent, now)
-	default:
-		stay.rate = streamRate(cfg, st.Rate, p.recent, now)
+	case !p.full: // a full read-ahead has shown the node keeps up: nothing to predict
 		stay.risk, stay.stall = stallRisk(stay.rate, p.buffer, p.bitrate), expectedStall(stay.rate, p.buffer, p.bitrate)
 	}
 	return stay
@@ -256,36 +284,30 @@ func (c *Controller) holds(p *Playback, stay option, now time.Time) string {
 	return ""
 }
 
-// weighMoves judges a switch to each other usable node at B − g: nothing
-// arrives during its gap g.
-func (c *Controller) weighMoves(p *Playback, standby *nodes.Node, now time.Time) []option {
-	var moves []option
-	for _, n := range c.usable(func(n *nodes.Node) bool { return n != p.node }) {
-		rate, gap := c.stats.StateAt(n, now).Rate, c.switchGap(n)
-		after := p.buffer - gap
-		moves = append(moves, option{n, rate, gap, stallRisk(rate, after, p.bitrate), expectedStall(rate, after, p.bitrate), n != standby, c.rttKey(n)})
-	}
-	return moves
+// moves judges a switch to each other usable node.
+func (c *Controller) moves(p *Playback, now time.Time) []option {
+	return c.weigh(c.usable(func(n *nodes.Node) bool { return n != p.node }), p.buffer, p.bitrate, now, true)
 }
 
-// choose picks a move, or nil to stay, and says why: the move that meets ε
-// with the least expected stall, else whichever action stalls least.
-func (c *Controller) choose(stay option, moves []option) (*nodes.Node, string) {
-	if len(moves) == 0 {
+// choose picks a move, or nil to stay, and says why: staying if it meets ε,
+// else the move that meets ε with the least expected stall (the standby on a
+// tie), else whichever action stalls least.
+func (c *Controller) choose(stay option, moves []option, standby *nodes.Node) (*nodes.Node, string) {
+	o, ok := c.best(append([]option{stay}, moves...), func(a, b option) int {
+		return cmp.Or(cmp.Compare(btoi(a.n != stay.n), btoi(b.n != stay.n)), cmp.Compare(a.stall, b.stall),
+			cmp.Compare(btoi(a.n != standby), btoi(b.n != standby)), cmp.Compare(a.rtt, b.rtt))
+	})
+	switch {
+	case o.n == stay.n && ok:
+		return nil, "meets the target"
+	case o.n == stay.n && len(moves) == 0:
 		return nil, "no other usable node"
+	case o.n == stay.n:
+		return nil, "no move stalls less; none meets the target"
+	case ok:
+		return o.n, "meets the target with the least expected stall"
 	}
-	eps := c.cfg.Load().Control.StallRisk
-	if passing := slices.DeleteFunc(slices.Clone(moves), func(m option) bool { return m.risk > eps }); len(passing) > 0 {
-		return slices.MinFunc(passing, betterMove).n, "meets the target with the least expected stall"
-	}
-	if best := slices.MinFunc(moves, betterMove); best.stall < stay.stall {
-		return best.n, "least expected stall; none meets the target"
-	}
-	return nil, "no move stalls less; none meets the target"
-}
-
-func betterMove(a, b option) int {
-	return cmp.Or(cmp.Compare(a.stall, b.stall), cmp.Compare(btoi(a.notStandby), btoi(b.notStandby)), cmp.Compare(a.rtt, b.rtt))
+	return o.n, "least expected stall; none meets the target"
 }
 
 // switchGap estimates how long a switch to n delivers nothing: about four
@@ -313,7 +335,8 @@ func (p *Playback) Failover(failed *nodes.Node) *nodes.Node {
 		return sb
 	}
 	others := c.usable(func(n *nodes.Node) bool { return n != failed && n != p.node })
-	return c.leastRisk(others, p.buffer, p.bitrate)
+	o, _ := c.best(c.weigh(others, p.buffer, p.bitrate, time.Now(), true), byStall)
+	return o.n
 }
 
 // Switched records that the stream now runs on n; a new standby follows.
@@ -330,67 +353,29 @@ func (p *Playback) Switched(n *nodes.Node, reason string) {
 	p.failovers++
 }
 
-// standbyFor keeps a warm standby: the lowest risk at the current buffer
-// among nodes sharing neither provider nor /24 with the media node, relaxed
-// step by step when no such node exists. Re-picked every 5 min.
+// standbyFor keeps a warm standby: among the nodes that meet the target at
+// the current buffer, one sharing neither provider nor /24 with the media
+// node, else neither /24, else any, then the least expected stall.
+// Re-picked every 5 min.
 func (c *Controller) standbyFor(p *Playback) *nodes.Node {
 	if sb := p.standby; sb != nil && sb != p.node && time.Since(p.standbyAt) < standbyRefresh && !c.open(sb) {
 		return sb
 	}
 	m := p.node
-	tiers := []func(*nodes.Node) bool{
-		func(n *nodes.Node) bool { return n.Provider != m.Provider && n.Subnet != m.Subnet },
-		func(n *nodes.Node) bool { return n.Subnet != m.Subnet },
-		func(*nodes.Node) bool { return true },
+	shared := func(n *nodes.Node) int { return 2*btoi(n.Subnet == m.Subnet) + btoi(n.Provider == m.Provider) }
+	others := c.usable(func(n *nodes.Node) bool { return n != m })
+	o, _ := c.best(c.weigh(others, p.buffer, p.bitrate, time.Now(), true), func(a, b option) int {
+		return cmp.Or(cmp.Compare(shared(a.n), shared(b.n)), byStall(a, b))
+	})
+	if o.n != nil {
+		p.standby, p.standbyAt = o.n, time.Now()
 	}
-	for _, diverse := range tiers {
-		cands := c.usable(func(n *nodes.Node) bool { return n != m && diverse(n) })
-		if n := c.leastRisk(cands, p.buffer, p.bitrate); n != nil {
-			p.standby, p.standbyAt = n, time.Now()
-			return n
-		}
-	}
-	return nil
+	return o.n
 }
 
-// risk is a node's stall risk judged by its belief alone: for nodes that
-// carry no stream of this session.
-func (c *Controller) risk(n *nodes.Node, buffer time.Duration, bitrate float64) float64 {
-	st := c.stats.State(n)
-	if st.Open(time.Now()) {
-		return 1
-	}
-	return stallRisk(st.Rate, buffer, bitrate)
-}
-
-func (c *Controller) passing(ns []*nodes.Node, buffer time.Duration, bitrate float64) []*nodes.Node {
-	eps := c.cfg.Load().Control.StallRisk
-	var out []*nodes.Node
-	for _, n := range ns {
-		if c.risk(n, buffer, bitrate) <= eps {
-			out = append(out, n)
-		}
-	}
-	return out
-}
-
-// leastRisk picks the lowest stall risk, ties broken by RTT: before any rate
-// data every node ties, and a low-latency node is the better guess.
-func (c *Controller) leastRisk(ns []*nodes.Node, buffer time.Duration, bitrate float64) *nodes.Node {
-	type scored struct {
-		n         *nodes.Node
-		risk, rtt float64
-	}
-	if len(ns) == 0 {
-		return nil
-	}
-	s := make([]scored, len(ns))
-	for i, n := range ns {
-		s[i] = scored{n, c.risk(n, buffer, bitrate), c.rttKey(n)}
-	}
-	return slices.MinFunc(s, func(a, b scored) int {
-		return cmp.Or(cmp.Compare(a.risk, b.risk), cmp.Compare(a.rtt, b.rtt))
-	}).n
+// byStall prefers the least expected stall, then the lowest RTT.
+func byStall(a, b option) int {
+	return cmp.Or(cmp.Compare(a.stall, b.stall), cmp.Compare(a.rtt, b.rtt))
 }
 
 func meanOf(xs []float64) float64 {

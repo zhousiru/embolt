@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +24,26 @@ func TestExpectedStall(t *testing.T) {
 	}
 	if s := expectedStall(measure.Belief{}, 0, 20); math.Abs(s-120.0/20*20*(1+10.0/120)) > 1e-9 {
 		t.Errorf("dead node: %.2f s of stall", s)
+	}
+}
+
+// TestBest: every choice meets the target first, by the caller's preference,
+// and falls back on the least expected stall when nothing does.
+func TestBest(t *testing.T) {
+	c, n := testController(t, nil)
+	a, b := n["a"], n["b"]
+	byName := func(x, y option) int { return strings.Compare(x.n.Name, y.n.Name) }
+	if o, ok := c.best([]option{{n: b, risk: 0.001, stall: 0.1}, {n: a, risk: 0.005, stall: 0.5}}, byName); o.n != a || !ok {
+		t.Errorf("both pass: picked %v (meets %v), want a by preference", o.n, ok)
+	}
+	if o, ok := c.best([]option{{n: a, risk: 0.5, stall: 0.1}, {n: b, risk: 0.005, stall: 9}}, byName); o.n != b || !ok {
+		t.Errorf("only b passes: picked %v (meets %v), want b", o.n, ok)
+	}
+	if o, ok := c.best([]option{{n: a, risk: 0.5, stall: 8}, {n: b, risk: 0.9, stall: 3}}, byName); o.n != b || ok {
+		t.Errorf("none passes: picked %v (meets %v), want b, the least stall", o.n, ok)
+	}
+	if o, _ := c.best(nil, byName); o.n != nil {
+		t.Errorf("no options: picked %v", o.n)
 	}
 }
 

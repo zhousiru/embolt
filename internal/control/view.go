@@ -52,15 +52,15 @@ func (c *Controller) Session(key string) view.SessionDetail {
 	}
 	now := time.Now()
 	sv := sessionView(p)
-	stay, moves := c.weighStay(p, now), c.weighMoves(p, p.standby, now)
+	stay, moves := c.weighStay(p, now), c.moves(p, now)
 	d.Session = &sv
 	if why := c.holds(p, stay, now); why != "" {
 		d.Verdict = &view.Verdict{Reason: why}
 	} else {
-		n, why := c.choose(stay, moves)
+		n, why := c.choose(stay, moves, p.standby)
 		d.Verdict = &view.Verdict{To: refPtr(n), Reason: why}
 	}
-	slices.SortFunc(moves, func(a, b option) int { return cmp.Or(cmp.Compare(a.risk, b.risk), betterMove(a, b)) })
+	slices.SortFunc(moves, func(a, b option) int { return cmp.Or(cmp.Compare(a.risk, b.risk), byStall(a, b)) })
 	for i, o := range append([]option{stay}, moves...) {
 		role := ""
 		switch {
