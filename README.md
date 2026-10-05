@@ -52,12 +52,13 @@ under 1%: stay, switch to the standby, switch to the best other node. No byte
 for 4 s, or a connection error, fails over at once.
 
 Rates are learned from playback alone. Every stream samples its media node,
-and while a session's read-ahead is full it explores: once the player has
-drained half of it, the next stretch (up to 8 s, or until it is full again)
-is read through the node whose result would most lower the expected stall
-time (the knowledge gradient), then the stream resumes on its media node at
-the next byte. Probing goes where doubt could change a decision, and costs no
-extra bytes and no second connection.
+and while a session's read-ahead is full it explores, at most every 3 min:
+once the player has drained half of it, the next stretch (up to 8 s, or until
+it is full again) is read through another node, then the stream resumes on
+its media node at the next byte. The node is picked by Thompson sampling, one
+draw from each node's rate posterior, so barely measured nodes that may be
+fast are tried first, known fallbacks stay fresh, and known slow nodes are
+left alone. A test costs no extra bytes and no second connection.
 `embolt replay` runs the model over the logged samples and reports
 how well calibrated it is, to tune `half_life` and `prior_strength` on your
 own data:
@@ -84,7 +85,7 @@ task build       # bin/embolt with the pane embedded
 | `internal/config` | schema, defaults, validation, hot reload |
 | `internal/nodes` | subscriptions, the mihomo wrapper (only importer of mihomo), transports |
 | `internal/measure` | beliefs, breaker, ping, sample log |
-| `internal/control` | stall risk, roles, switch actions, knowledge-gradient exploration |
+| `internal/control` | stall risk, roles, switch actions, Thompson-sampled exploration |
 | `internal/proxy` | ingress, classifier, PlaybackInfo, media lane, failover, HLS |
 | `internal/cache` | image and subtitle disk LRU |
 | `internal/view` | secret-free DTOs, source of the TypeScript types |

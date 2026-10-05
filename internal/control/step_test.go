@@ -47,6 +47,25 @@ func TestBest(t *testing.T) {
 	}
 }
 
+// TestByDraw: Thompson sampling tests the barely measured node that may be
+// fast, and the known fast one, but hardly ever the one known to be slow.
+func TestByDraw(t *testing.T) {
+	slow, fast, vague := &nodes.Node{Name: "slow"}, &nodes.Node{Name: "fast"}, &nodes.Node{Name: "vague"}
+	beliefs := map[*nodes.Node]measure.Belief{
+		slow:  measure.NewBelief(math.Log(3), 0.2, 40),
+		fast:  measure.NewBelief(math.Log(100), 0.2, 40),
+		vague: measure.NewBelief(math.Log(60), 1, 1),
+	}
+	const trials = 2000
+	first := map[*nodes.Node]int{}
+	for range trials {
+		first[byDraw(beliefs)[0]]++
+	}
+	if first[slow] > trials/100 || first[vague] < trials/20 || first[fast] < trials/4 {
+		t.Errorf("first picks of %d: slow %d, vague %d, fast %d", trials, first[slow], first[vague], first[fast])
+	}
+}
+
 // testController has two direct nodes, a and b, with the given rate beliefs.
 func testController(t *testing.T, rates map[string][]float64) (*Controller, map[string]*nodes.Node) {
 	t.Helper()

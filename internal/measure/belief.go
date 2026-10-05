@@ -101,7 +101,7 @@ func (t StudentT) CDF(x float64) float64 {
 	return tail
 }
 
-// Quantile inverts CDF by bisection; it is only used for display.
+// Quantile inverts CDF by bisection.
 func (t StudentT) Quantile(p float64) float64 {
 	lo, hi := t.Loc-1e3*t.Scale, t.Loc+1e3*t.Scale
 	for range 100 {

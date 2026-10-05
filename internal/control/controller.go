@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"maps"
 	"math"
+	"math/rand/v2"
 	"net/url"
 	"slices"
 	"sync"
@@ -181,63 +182,30 @@ func (c *Controller) pingAll(ctx context.Context) {
 	c.reconsiderPrimary()
 }
 
-// minProbeValue is the least expected gain, in seconds of stall, worth a test.
-const minProbeValue = 0.01
+// explorable orders the usable nodes that no stream is reading for a test,
+// by Thompson sampling: one draw of each node's typical rate from its
+// posterior, highest first.
+func (c *Controller) explorable(busy map[*nodes.Node]bool, now time.Time) []*nodes.Node {
+	beliefs := map[*nodes.Node]measure.Belief{}
+	for _, n := range c.usable(func(n *nodes.Node) bool { return !busy[n] }) {
+		beliefs[n] = c.stats.StateAt(n, now).Rate
+	}
+	return byDraw(beliefs)
+}
 
-// ranked orders the nodes worth a test, most valuable first: the knowledge
-// gradient of a test, how far the best expected stall time over usable nodes
-// would drop once its result is known (probeValue). A node far above the
-// bitrate, or far worse than the best, is worth nearly nothing.
-func (c *Controller) ranked(busy map[*nodes.Node]bool, bitrate float64, now time.Time) []*nodes.Node {
-	worth := c.probeValues(c.usable(nil), busy, bitrate, now)
-	ranked := slices.Collect(maps.Keys(worth))
-	slices.SortFunc(ranked, func(a, b *nodes.Node) int { return cmp.Compare(worth[b], worth[a]) })
+// byDraw ranks nodes by one draw each from the posterior of their typical
+// rate. A node that may be fast but is barely measured often draws high, a
+// node known to be slow seldom does, and a node known to be fast does now
+// and then, which keeps the fallbacks' beliefs fresh. As beliefs fade, the
+// draws spread and exploration widens again.
+func byDraw(beliefs map[*nodes.Node]measure.Belief) []*nodes.Node {
+	draw := make(map[*nodes.Node]float64, len(beliefs))
+	for n, b := range beliefs {
+		draw[n] = b.Mean().Quantile(rand.Float64())
+	}
+	ranked := slices.Collect(maps.Keys(draw))
+	slices.SortFunc(ranked, func(a, b *nodes.Node) int { return cmp.Compare(draw[b], draw[a]) })
 	return ranked
-}
-
-// probeValues scores a test of each usable node that no stream is
-// measuring already, keeping those worth at least minProbeValue. Choices are
-// judged at play start: B = 0 at the given bitrate.
-func (c *Controller) probeValues(usable []*nodes.Node, busy map[*nodes.Node]bool, bitrate float64, now time.Time) map[*nodes.Node]float64 {
-	cfg := c.cfg.Load().Control
-	rates := make(map[*nodes.Node]measure.Belief, len(usable))
-	stall := make(map[*nodes.Node]float64, len(usable))
-	for _, n := range usable {
-		rates[n] = c.stats.StateAt(n, now).Rate
-		stall[n] = expectedStall(rates[n], 0, bitrate)
-	}
-	worth := map[*nodes.Node]float64{}
-	for _, n := range usable {
-		if busy[n] {
-			continue
-		}
-		best := math.Inf(1) // over the other nodes
-		for _, m := range usable {
-			if m != n {
-				best = min(best, stall[m])
-			}
-		}
-		if v := probeValue(cfg, rates[n], best, bitrate, now); v >= minProbeValue {
-			worth[n] = v
-		}
-	}
-	return worth
-}
-
-// probeValue is the knowledge gradient of one test of a node with belief
-// b, when the best other node stalls for best seconds: the expected drop in
-// min(best, the node's stall), over 16 equally likely outcomes of the test.
-func probeValue(cfg config.Control, b measure.Belief, best, bitrate float64, now time.Time) float64 {
-	const outcomes = 16
-	before := min(best, expectedStall(b, 0, bitrate))
-	pred := b.Predictive()
-	gain := 0.0
-	for i := range outcomes {
-		after := b
-		after.Observe(pred.Quantile((float64(i)+0.5)/outcomes), now, cfg.HalfLife)
-		gain += before - min(best, expectedStall(after, 0, bitrate))
-	}
-	return gain / outcomes
 }
 
 // firstWithinIPCap takes the first ranked node that keeps the distinct exit

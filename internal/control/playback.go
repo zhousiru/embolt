@@ -185,8 +185,8 @@ func (s *Stream) Step(o Observation) *nodes.Node {
 // Explore picks a node to read the session's next stretch through, or nil:
 // a speed test whose bytes are played, and the only test Embolt runs. It
 // runs only when the read-ahead has filled, so the media node keeps up and
-// the buffer can carry a test, at most once per exploreGap, on the node whose
-// result is worth the most, within the exit-IP cap. The stream comes back to
+// the buffer can carry a test, at most once per exploreGap, on a node picked
+// by Thompson sampling, within the exit-IP cap. The stream comes back to
 // the media node afterwards: a faster node is no reason to move a session
 // that meets its target, but it informs the next pick, standby and failover.
 func (s *Stream) Explore(o Observation) *nodes.Node {
@@ -203,7 +203,7 @@ func (s *Stream) Explore(o Observation) *nodes.Node {
 		c.pinned(cfg.Pins.Media) == p.node {
 		return nil
 	}
-	n := c.firstWithinIPCap(c.ranked(c.busy(), p.bitrate, now), now)
+	n := c.firstWithinIPCap(c.explorable(c.busy(), now), now)
 	if n == nil {
 		return nil
 	}
