@@ -122,7 +122,6 @@ func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request, target *url
 		return
 	}
 	st.parseRange(resp)
-	s.ctrl.SetTarget(measure.Target{URL: req.URL, Header: speedTestHeader(req.Header), Size: st.total})
 	writeHeader(w, resp)
 
 	ringBytes := min(int64(s.cfg.Load().Control.ReadAhead.Seconds()*st.bitrate*1e6/8), maxRing)
@@ -554,16 +553,6 @@ func writeHeader(w http.ResponseWriter, resp *http.Response) {
 	maps.Copy(w.Header(), resp.Header)
 	stripHopByHop(w.Header())
 	w.WriteHeader(resp.StatusCode)
-}
-
-// speedTestHeader keeps what a speed test needs to read as the player:
-// its credentials and identity, without conditionals or ranges.
-func speedTestHeader(h http.Header) http.Header {
-	out := h.Clone()
-	for _, k := range []string{"Range", "If-Range", "If-None-Match", "If-Modified-Since"} {
-		out.Del(k)
-	}
-	return out
 }
 
 var hopByHop = []string{"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",

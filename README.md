@@ -51,14 +51,13 @@ is a Normal–Inverse-Gamma posterior on log-rate whose evidence halves every
 under 1%: stay, switch to the standby, switch to the best other node. No byte
 for 4 s, or a connection error, fails over at once.
 
-Speed tests read the file being played, with the player's own token, from the
-nodes whose result would most lower the expected stall time (the knowledge
-gradient), so probing goes where doubt could change a decision. While a
-session's read-ahead is full, it explores instead: once the player has drained
-half of it, the next stretch (up to 8 s, or until it is full again) is read
-through the node worth testing most, then the stream resumes on its media node
-at the next byte. The test costs no extra bytes and no second connection, and
-the speed-test schedule pauses while sessions explore.
+Rates are learned from playback alone. Every stream samples its media node,
+and while a session's read-ahead is full it explores: once the player has
+drained half of it, the next stretch (up to 8 s, or until it is full again)
+is read through the node whose result would most lower the expected stall
+time (the knowledge gradient), then the stream resumes on its media node at
+the next byte. Probing goes where doubt could change a decision, and costs no
+extra bytes and no second connection.
 `embolt replay` runs the model over the logged samples and reports
 how well calibrated it is, to tune `half_life` and `prior_strength` on your
 own data:
@@ -84,8 +83,8 @@ task build       # bin/embolt with the pane embedded
 | `cmd/embolt` | `serve`, `replay`, `healthcheck`, `version` |
 | `internal/config` | schema, defaults, validation, hot reload |
 | `internal/nodes` | subscriptions, the mihomo wrapper (only importer of mihomo), transports |
-| `internal/measure` | beliefs, breaker, ping and speed test, sample log |
-| `internal/control` | stall risk, roles, switch actions, knowledge-gradient probing |
+| `internal/measure` | beliefs, breaker, ping, sample log |
+| `internal/control` | stall risk, roles, switch actions, knowledge-gradient exploration |
 | `internal/proxy` | ingress, classifier, PlaybackInfo, media lane, failover, HLS |
 | `internal/cache` | image and subtitle disk LRU |
 | `internal/view` | secret-free DTOs, source of the TypeScript types |

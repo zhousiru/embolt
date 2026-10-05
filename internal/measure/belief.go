@@ -27,16 +27,16 @@ func NewBelief(mu, sigma, n float64) Belief {
 	return Belief{Mu: mu, Kappa: n, Alpha: alpha, Beta: sigma * sigma * (alpha - 1)}
 }
 
-// Observe folds in x with weight w (1 for a real sample, ½ for a probe),
-// after fading old evidence by 2^(−Δt/halfLife).
-func (b *Belief) Observe(x, w float64, now time.Time, halfLife time.Duration) {
+// Observe folds in the sample x after fading old evidence by
+// 2^(−Δt/halfLife).
+func (b *Belief) Observe(x float64, now time.Time, halfLife time.Duration) {
 	b.fade(now, halfLife)
-	k := b.Kappa + w
+	k := b.Kappa + 1
 	d := x - b.Mu
-	b.Beta += b.Kappa * w * d * d / (2 * k)
-	b.Mu += w * d / k
+	b.Beta += b.Kappa * d * d / (2 * k)
+	b.Mu += d / k
 	b.Kappa = k
-	b.Alpha += w / 2
+	b.Alpha += 0.5
 	b.At = now
 }
 

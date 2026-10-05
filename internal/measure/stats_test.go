@@ -15,11 +15,11 @@ func TestRecentSurvivesARestart(t *testing.T) {
 	samples, beliefs := filepath.Join(dir, "samples"), filepath.Join(dir, "beliefs.json")
 	a, b := &nodes.Node{ID: "a"}, &nodes.Node{ID: "b"}
 
-	// Before: a speed test on a, then more pings than fit, spread over two days.
+	// Before: an explored stretch on a, then more pings than fit, spread over two days.
 	before := NewStats(store, samples)
 	t.Cleanup(func() { before.log.file.Close() }) // Windows cannot remove an open file
 	t0 := time.Now().Add(-26 * time.Hour)
-	before.Record(a, Sample{Kind: KindSpeed, Time: t0, Bytes: 10e6, Dur: 2 * time.Second})
+	before.Record(a, Sample{Kind: KindExplore, Time: t0, Bytes: 10e6, Dur: 2 * time.Second})
 	for i := range recentLen + 5 {
 		before.Record(b, Sample{Kind: KindPing, Time: t0.Add(time.Duration(i) * time.Hour), TTFB: 100 * time.Millisecond})
 	}
@@ -40,8 +40,8 @@ func TestRecentSurvivesARestart(t *testing.T) {
 	}
 
 	got := after.State(a).Recent
-	if len(got) != 3 || got[0].Kind != KindSpeed || got[2].TTFB != live.TTFB {
-		t.Errorf("a's recent = %+v, want the speed test, the ping, then the live ping once", got)
+	if len(got) != 3 || got[0].Kind != KindExplore || got[2].TTFB != live.TTFB {
+		t.Errorf("a's recent = %+v, want the explored stretch, the ping, then the live ping once", got)
 	}
 	gotB := after.State(b).Recent
 	if len(gotB) != recentLen || !gotB[0].Time.Equal(t0.Add(5*time.Hour)) {

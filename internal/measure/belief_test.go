@@ -37,7 +37,7 @@ func TestBeliefLearns(t *testing.T) {
 	r := rand.New(rand.NewPCG(1, 2))
 	now := time.Unix(0, 0)
 	for i := range 200 {
-		b.Observe(math.Log(50)+0.2*r.NormFloat64(), 1, now.Add(time.Duration(i)*time.Second), 2*time.Hour)
+		b.Observe(math.Log(50)+0.2*r.NormFloat64(), now.Add(time.Duration(i)*time.Second), 2*time.Hour)
 	}
 	if got := math.Exp(b.Mu); math.Abs(got-50) > 3 {
 		t.Errorf("mean = %.1f Mbps, want ≈ 50", got)
@@ -55,7 +55,7 @@ func TestFadeWidensAndKeepsVariance(t *testing.T) {
 	b := NewBelief(0, 1, 2)
 	t0 := time.Unix(0, 0)
 	for i := range 20 {
-		b.Observe(float64(i%2), 1, t0, time.Hour)
+		b.Observe(float64(i%2), t0, time.Hour)
 	}
 	later := b.AsOf(t0.Add(time.Hour), time.Hour)
 	if math.Abs(later.Kappa-b.Kappa/2) > 1e-9 {

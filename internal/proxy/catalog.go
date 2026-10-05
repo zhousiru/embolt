@@ -142,7 +142,6 @@ func (s *Server) playbackInfo(resp *http.Response, item string) error {
 		}
 	}
 	c.mu.Unlock()
-	s.ctrl.Kick() // play is about to start: refresh rate beliefs
 	if changed {
 		raw, _ = json.Marshal(info)
 		setBody(resp, raw)

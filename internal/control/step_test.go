@@ -187,7 +187,4 @@ func TestExploreOnlyWithAFullReadAhead(t *testing.T) {
 	if got := s.Explore(Observation{Full: true}); got != nil {
 		t.Errorf("explored %v again within %v", got, exploreGap)
 	}
-	if !c.exploring() {
-		t.Error("speed rounds would run beside the exploring session")
-	}
 }

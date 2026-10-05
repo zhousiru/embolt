@@ -18,9 +18,6 @@ import (
 // Window is the length of a passive rate sample.
 const Window = 2 * time.Second
 
-// ProbeWeight is what a speed test counts for against a playback sample.
-const ProbeWeight = 0.5
-
 const (
 	minRateDur  = 200 * time.Millisecond
 	minRateMbps = 0.1 // a stalled window still counts, as very slow
@@ -42,7 +39,6 @@ type Kind string
 
 const (
 	KindPing    Kind = "ping"
-	KindSpeed   Kind = "speed"
 	KindPassive Kind = "passive"
 	KindExplore Kind = "explore" // playback read through another node for a stretch
 )
@@ -130,14 +126,10 @@ func (s *Stats) Record(n *nodes.Node, smp Sample) {
 		return
 	}
 	if smp.Kind == KindPing && smp.TTFB > 0 {
-		e.RTT.Observe(math.Log(float64(smp.TTFB)/float64(time.Millisecond)), 1, smp.Time, hl)
+		e.RTT.Observe(math.Log(float64(smp.TTFB)/float64(time.Millisecond)), smp.Time, hl)
 	}
 	if r := smp.Mbps(); r > 0 {
-		w := 1.0
-		if smp.Kind == KindSpeed {
-			w = ProbeWeight
-		}
-		e.Rate.Observe(math.Log(r), w, smp.Time, hl)
+		e.Rate.Observe(math.Log(r), smp.Time, hl)
 	}
 }
 

@@ -36,14 +36,9 @@ const (
 
 var ErrNoNode = errors.New("no usable node")
 
-var (
-	failovers = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "embolt_failovers_total", Help: "Media node switches, by reason.",
-	}, []string{"reason"})
-	probeBytes = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "embolt_probe_bytes_total", Help: "Bytes read by speed tests.",
-	})
-)
+var failovers = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "embolt_failovers_total", Help: "Media node switches, by reason.",
+}, []string{"reason"})
 
 type Controller struct {
 	cfg   *config.Store
@@ -52,17 +47,14 @@ type Controller struct {
 	base  *url.URL
 
 	lastActive atomic.Int64
-	kick       chan struct{}
 
 	mu         sync.Mutex
 	primary    *nodes.Node
 	challenger *nodes.Node
 	wins       int
 	plays      map[string]*Playback
-	target     *measure.Target
-	refused    time.Time            // speed tests paused until
-	explored   time.Time            // a session last read through another node
-	tested     map[string]time.Time // node ID → last speed test, for the exit-IP cap
+	refused    time.Time            // exploration paused until
+	tested     map[string]time.Time // node ID → last explored, for the exit-IP cap
 	peak       float64              // highest bitrate played within peakMemory
 	peakAt     time.Time
 }
@@ -73,41 +65,24 @@ func New(cfg *config.Store, pool *nodes.Pool, stats *measure.Stats) *Controller 
 		pool:   pool,
 		stats:  stats,
 		base:   cfg.Load().Upstream.Base(),
-		kick:   make(chan struct{}, 1),
 		plays:  map[string]*Playback{},
 		tested: map[string]time.Time{},
 	}
 }
 
-// Touch marks a client as active, which speeds up probing.
+// Touch marks a client as active, which speeds up pinging.
 func (c *Controller) Touch() { c.lastActive.Store(time.Now().UnixNano()) }
 
 func (c *Controller) active() bool {
 	return time.Since(time.Unix(0, c.lastActive.Load())) < activeWindow
 }
 
-// SetTarget remembers the file being played for speed tests.
-func (c *Controller) SetTarget(t measure.Target) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.target = &t
-}
-
-// Kick runs a speed-test round now: called at play start.
-func (c *Controller) Kick() {
-	select {
-	case c.kick <- struct{}{}:
-	default:
-	}
-}
-
-// Run pings and speed-tests on schedule and expires idle playbacks.
+// Run pings on schedule and expires idle playbacks. Rates are learned from
+// playback alone: its own samples, and the stretches sessions explore.
 func (c *Controller) Run(ctx context.Context) {
 	ping := time.NewTimer(0)
-	speed := time.NewTimer(c.speedInterval())
 	expire := time.NewTicker(30 * time.Second)
 	defer ping.Stop()
-	defer speed.Stop()
 	defer expire.Stop()
 	for {
 		select {
@@ -119,13 +94,6 @@ func (c *Controller) Run(ctx context.Context) {
 		case <-ping.C:
 			c.pingAll(ctx)
 			ping.Reset(c.pingInterval())
-		case <-c.kick:
-			c.speedRound(ctx)
-		case <-speed.C:
-			if c.active() && !c.exploring() {
-				c.speedRound(ctx)
-			}
-			speed.Reset(c.speedInterval())
 		case <-expire.C:
 			c.expire()
 		}
@@ -143,28 +111,13 @@ func (c *Controller) pingInterval() time.Duration {
 	}
 }
 
-// speedInterval paces rounds of three tests to speed_tests_per_hour.
-func (c *Controller) speedInterval() time.Duration {
-	perHour := max(c.cfg.Load().Probes.SpeedTestsPerHour, 1)
-	return 3 * time.Hour / time.Duration(perHour)
-}
-
-// exploring reports whether a session tested a node from its read-ahead
-// within the last speed-test interval: playback is doing the probing, and a
-// separate test would only compete with it for the downlink.
-func (c *Controller) exploring() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return time.Since(c.explored) < c.speedInterval()
-}
-
-// Refused pauses speed tests and exploration for 1 h: the server answered
-// one with 403 or 429.
+// Refused pauses exploration for 1 h: the server answered an explored
+// stretch with 403 or 429.
 func (c *Controller) Refused() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.refused = time.Now().Add(time.Hour)
-	slog.Warn("server refused a speed test; pausing speed tests for 1 h")
+	slog.Warn("server refused an explored node; pausing exploration for 1 h")
 }
 
 // Primary is the node for control traffic: the quickest to deliver a burst
@@ -238,51 +191,13 @@ func (c *Controller) pingAll(ctx context.Context) {
 	c.reconsiderPrimary()
 }
 
-// speedRound tests up to 3 nodes, those whose result is worth the most:
-// the knowledge gradient of a test, how far the best expected stall time over
-// usable nodes would drop once its result is known (probeValue). A node far
-// above the bitrate, or far worse than the best, is worth nearly nothing.
-func (c *Controller) speedRound(ctx context.Context) {
-	c.mu.Lock()
-	now := time.Now()
-	if c.target == nil || now.Before(c.refused) {
-		c.mu.Unlock()
-		return
-	}
-	target := *c.target
-	busy := c.busy()
-	bitrate := 0.0 // the highest playing, else the typical
-	for _, p := range c.plays {
-		if len(p.streams) > 0 {
-			bitrate = max(bitrate, p.bitrate)
-		}
-	}
-	bitrate = cmp.Or(bitrate, c.typicalMbps())
-	c.mu.Unlock()
-
-	ranked := c.ranked(busy, bitrate, now)
-
-	c.mu.Lock()
-	picks := c.withinIPCap(ranked, now, 3)
-	c.mu.Unlock()
-	for _, n := range picks {
-		s, err := measure.SpeedTest(ctx, n, target)
-		if errors.Is(err, measure.ErrRefused) {
-			c.Refused()
-			return
-		}
-		if err != nil {
-			continue
-		}
-		probeBytes.Add(float64(s.Bytes))
-		c.stats.Record(n, s)
-	}
-}
-
 // minProbeValue is the least expected gain, in seconds of stall, worth a test.
 const minProbeValue = 0.01
 
-// ranked orders the nodes worth a test, most valuable first.
+// ranked orders the nodes worth a test, most valuable first: the knowledge
+// gradient of a test, how far the best expected stall time over usable nodes
+// would drop once its result is known (probeValue). A node far above the
+// bitrate, or far worse than the best, is worth nearly nothing.
 func (c *Controller) ranked(busy map[*nodes.Node]bool, bitrate float64, now time.Time) []*nodes.Node {
 	worth := c.probeValues(c.usable(nil), busy, bitrate, now)
 	ranked := slices.Collect(maps.Keys(worth))
@@ -290,7 +205,7 @@ func (c *Controller) ranked(busy map[*nodes.Node]bool, bitrate float64, now time
 	return ranked
 }
 
-// probeValues scores a speed test of each usable node that no stream is
+// probeValues scores a test of each usable node that no stream is
 // measuring already, keeping those worth at least minProbeValue. Choices are
 // judged at play start: B = 0 at the given bitrate.
 func (c *Controller) probeValues(usable []*nodes.Node, busy map[*nodes.Node]bool, bitrate float64, now time.Time) map[*nodes.Node]float64 {
@@ -319,7 +234,7 @@ func (c *Controller) probeValues(usable []*nodes.Node, busy map[*nodes.Node]bool
 	return worth
 }
 
-// probeValue is the knowledge gradient of one speed test of a node with belief
+// probeValue is the knowledge gradient of one test of a node with belief
 // b, when the best other node stalls for best seconds: the expected drop in
 // min(best, the node's stall), over 16 equally likely outcomes of the test.
 func probeValue(cfg config.Control, b measure.Belief, best, bitrate float64, now time.Time) float64 {
@@ -329,15 +244,16 @@ func probeValue(cfg config.Control, b measure.Belief, best, bitrate float64, now
 	gain := 0.0
 	for i := range outcomes {
 		after := b
-		after.Observe(pred.Quantile((float64(i)+0.5)/outcomes), measure.ProbeWeight, now, cfg.HalfLife)
+		after.Observe(pred.Quantile((float64(i)+0.5)/outcomes), now, cfg.HalfLife)
 		gain += before - min(best, expectedStall(after, 0, bitrate))
 	}
 	return gain / outcomes
 }
 
-// withinIPCap takes up to k nodes, keeping the distinct exit IPs the server
-// sees on the player's token within max_new_ips_per_hour. Caller holds c.mu.
-func (c *Controller) withinIPCap(ranked []*nodes.Node, now time.Time, k int) []*nodes.Node {
+// firstWithinIPCap takes the first ranked node that keeps the distinct exit
+// IPs the server sees on the player's token within max_new_ips_per_hour, and
+// counts it. Caller holds c.mu.
+func (c *Controller) firstWithinIPCap(ranked []*nodes.Node, now time.Time) *nodes.Node {
 	recent := 0
 	for id, t := range c.tested {
 		if now.Sub(t) > time.Hour {
@@ -346,22 +262,13 @@ func (c *Controller) withinIPCap(ranked []*nodes.Node, now time.Time, k int) []*
 			recent++
 		}
 	}
-	limit := c.cfg.Load().Probes.MaxNewIPsPerHour
-	var picks []*nodes.Node
 	for _, n := range ranked {
-		if len(picks) == k {
-			break
+		if _, seen := c.tested[n.ID]; seen || recent < c.cfg.Load().Probes.MaxNewIPsPerHour {
+			c.tested[n.ID] = now
+			return n
 		}
-		if _, seen := c.tested[n.ID]; !seen {
-			if recent >= limit {
-				continue
-			}
-			recent++
-		}
-		c.tested[n.ID] = now
-		picks = append(picks, n)
 	}
-	return picks
+	return nil
 }
 
 // typicalMbps is the bitrate to judge at when none is known: the highest

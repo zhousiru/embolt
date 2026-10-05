@@ -46,7 +46,6 @@ func replay(args []string) error {
 	ahead := horizonAverages(all, control.Horizon)
 
 	var rate, horizon, rtt calibration
-	var probeBytes int64
 	hourIPs, maxIPs, hour := map[string]bool{}, 0, time.Time{}
 	for i, s := range all {
 		n := known[s.Node]
@@ -64,10 +63,7 @@ func replay(args []string) error {
 		if s.Kind == measure.KindPing && s.Err == "" && s.TTFB > 0 {
 			rtt.add(st.RTT.Predictive().CDF(math.Log(float64(s.TTFB) / float64(time.Millisecond))))
 		}
-		if s.Kind == measure.KindSpeed || s.Kind == measure.KindExplore {
-			if s.Kind == measure.KindSpeed {
-				probeBytes += s.Bytes
-			}
+		if s.Kind == measure.KindExplore {
 			if h := s.Time.Truncate(time.Hour); !h.Equal(hour) {
 				hour, hourIPs = h, map[string]bool{}
 			}
@@ -78,7 +74,7 @@ func replay(args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "nodes\t%d\nspeed-test bytes\t%.1f MB\nmost exit IPs in an hour\t%d\n\n", len(known), float64(probeBytes)/1e6, maxIPs)
+	fmt.Fprintf(w, "nodes\t%d\nmost exit IPs explored in an hour\t%d\n\n", len(known), maxIPs)
 	fmt.Fprintln(w, "belief\tsamples\t<q10\t<q50\t<q90")
 	rate.print(w, "rate, one sample")
 	horizon.print(w, fmt.Sprintf("rate, %s average", control.Horizon))

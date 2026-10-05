@@ -36,9 +36,8 @@ proxy-providers:
 #   prior_strength: 2       # a new node's prior, in samples; check both with `embolt replay`
 
 # probes:
-#   speed_tests_per_hour: 12
-#   max_new_ips_per_hour: 8 # distinct nodes speed-tested on your token per hour
-#   explore: true # with a full read-ahead, read the next stretch through another node
+#   explore: true           # with a full read-ahead, read the next stretch through another node
+#   max_new_ips_per_hour: 8 # distinct nodes explored on your token per hour
 
 # listen: ":8096"
 # tls: {listen: ":8920", cert: /config/cert.pem, key: /config/key.pem}

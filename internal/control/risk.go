@@ -93,7 +93,7 @@ func streamRate(p config.Control, node measure.Belief, recent []float64, now tim
 	}
 	b := node.Capped(1)
 	for _, mbps := range recent {
-		b.Observe(math.Log(mbps), 1, now, p.HalfLife)
+		b.Observe(math.Log(mbps), now, p.HalfLife)
 	}
 	return b
 }
