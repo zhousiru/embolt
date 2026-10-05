@@ -192,7 +192,7 @@ func (s *Stream) Step(o Observation) *nodes.Node {
 func (s *Stream) Explore(o Observation) *nodes.Node {
 	p, c := s.Playback, s.c
 	cfg := c.cfg.Load()
-	if !o.Full || !cfg.Probes.Explore {
+	if !o.Full {
 		return nil
 	}
 	c.mu.Lock()

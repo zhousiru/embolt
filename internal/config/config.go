@@ -96,8 +96,7 @@ type Control struct {
 // Probes tune exploration, the only speed test: with a full read-ahead, a
 // session reads its next stretch through another node.
 type Probes struct {
-	MaxNewIPsPerHour int  `yaml:"max_new_ips_per_hour"`
-	Explore          bool `yaml:"explore"`
+	MaxNewIPsPerHour int `yaml:"max_new_ips_per_hour"`
 }
 
 // Pins name a node (by name or ID) that overrides the controller for a role.
@@ -131,7 +130,7 @@ func Default() *Config {
 			PriorStrength: 2,
 			ReadAhead:     60 * time.Second,
 		},
-		Probes:  Probes{MaxNewIPsPerHour: 8, Explore: true},
+		Probes:  Probes{MaxNewIPsPerHour: 8},
 		Cache:   Cache{SizeMB: 2048},
 		Web:     Web{Listen: ":9090"},
 		DataDir: "/data",
