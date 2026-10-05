@@ -12,17 +12,16 @@ import (
 )
 
 const (
-	minSwitchGap   = 20 * time.Second
-	standbyRefresh = 5 * time.Minute
-	switchRamp     = time.Second // a new node's ramp-up before it delivers
-	exploreGap     = 3 * time.Minute
+	minSwitchGap = 20 * time.Second
+	switchRamp   = time.Second // a new node's ramp-up before it delivers
+	exploreGap   = 3 * time.Minute
 )
 
 // StreamMemory is how far back a stream's own rate samples count.
 const StreamMemory = 30 * time.Second
 
 // Playback is one viewing session: one device watching one item. It holds
-// the media node, the warm standby, and the controller's view of the buffer.
+// the media node and the controller's view of the buffer.
 // Seeks and the player's side connections join the same Playback, so the
 // session keeps one exit IP.
 type Playback struct {
@@ -33,8 +32,6 @@ type Playback struct {
 	// Guarded by c.mu.
 	bitrate   float64
 	node      *nodes.Node
-	standby   *nodes.Node
-	standbyAt time.Time
 	switched  time.Time
 	explored  time.Time // last read a stretch through another node
 	failovers int
@@ -178,7 +175,7 @@ func (s *Stream) Step(o Observation) *nodes.Node {
 	if c.holds(p, stay, now) != "" {
 		return nil
 	}
-	n, _ := c.choose(stay, c.moves(p, now), c.standbyFor(p))
+	n, _ := c.choose(stay, c.moves(p, now))
 	return n
 }
 
@@ -188,7 +185,7 @@ func (s *Stream) Step(o Observation) *nodes.Node {
 // the buffer can carry a test, at most once per exploreGap, on a node picked
 // by Thompson sampling, within the exit-IP cap. The stream comes back to
 // the media node afterwards: a faster node is no reason to move a session
-// that meets its target, but it informs the next pick, standby and failover.
+// that meets its target, but it informs the next pick and failover.
 func (s *Stream) Explore(o Observation) *nodes.Node {
 	p, c := s.Playback, s.c
 	cfg := c.cfg.Load()
@@ -290,12 +287,11 @@ func (c *Controller) moves(p *Playback, now time.Time) []option {
 }
 
 // choose picks a move, or nil to stay, and says why: staying if it meets ε,
-// else the move that meets ε with the least expected stall (the standby on a
-// tie), else whichever action stalls least.
-func (c *Controller) choose(stay option, moves []option, standby *nodes.Node) (*nodes.Node, string) {
+// else the move that meets ε with the least expected stall, else whichever
+// action stalls least.
+func (c *Controller) choose(stay option, moves []option) (*nodes.Node, string) {
 	o, ok := c.best(append([]option{stay}, moves...), func(a, b option) int {
-		return cmp.Or(cmp.Compare(btoi(a.n != stay.n), btoi(b.n != stay.n)), cmp.Compare(a.stall, b.stall),
-			cmp.Compare(btoi(a.n != standby), btoi(b.n != standby)), cmp.Compare(a.rtt, b.rtt))
+		return cmp.Or(cmp.Compare(btoi(a.n != stay.n), btoi(b.n != stay.n)), byStall(a, b))
 	})
 	switch {
 	case o.n == stay.n && ok:
@@ -325,21 +321,18 @@ func btoi(b bool) int {
 }
 
 // Failover picks a replacement after a hard failure (no bytes for 4 s or a
-// connection error), without asking the model whether to move: the standby,
-// else the best other node.
+// connection error), without asking the model whether to move: the best
+// other node, judged then, as a step would judge a move.
 func (p *Playback) Failover(failed *nodes.Node) *nodes.Node {
 	c := p.c
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if sb := c.standbyFor(p); sb != nil && sb != failed {
-		return sb
-	}
 	others := c.usable(func(n *nodes.Node) bool { return n != failed && n != p.node })
 	o, _ := c.best(c.weigh(others, p.buffer, p.bitrate, time.Now(), true), byStall)
 	return o.n
 }
 
-// Switched records that the stream now runs on n; a new standby follows.
+// Switched records that the stream now runs on n.
 func (p *Playback) Switched(n *nodes.Node, reason string) {
 	c := p.c
 	c.mu.Lock()
@@ -348,29 +341,9 @@ func (p *Playback) Switched(n *nodes.Node, reason string) {
 		"buffer_s", round1(p.buffer.Seconds()), "rate_mbps", round1(p.live), "bitrate_mbps", round1(p.bitrate),
 		"stall_risk", math.Round(p.risk*1e4)/1e4)
 	failovers.WithLabelValues(reason).Inc()
-	p.node, p.standby = n, nil
+	p.node = n
 	p.switched = time.Now()
 	p.failovers++
-}
-
-// standbyFor keeps a warm standby: among the nodes that meet the target at
-// the current buffer, one sharing neither provider nor /24 with the media
-// node, else neither /24, else any, then the least expected stall.
-// Re-picked every 5 min.
-func (c *Controller) standbyFor(p *Playback) *nodes.Node {
-	if sb := p.standby; sb != nil && sb != p.node && time.Since(p.standbyAt) < standbyRefresh && !c.open(sb) {
-		return sb
-	}
-	m := p.node
-	shared := func(n *nodes.Node) int { return 2*btoi(n.Subnet == m.Subnet) + btoi(n.Provider == m.Provider) }
-	others := c.usable(func(n *nodes.Node) bool { return n != m })
-	o, _ := c.best(c.weigh(others, p.buffer, p.bitrate, time.Now(), true), func(a, b option) int {
-		return cmp.Or(cmp.Compare(shared(a.n), shared(b.n)), byStall(a, b))
-	})
-	if o.n != nil {
-		p.standby, p.standbyAt = o.n, time.Now()
-	}
-	return o.n
 }
 
 // byStall prefers the least expected stall, then the lowest RTT.

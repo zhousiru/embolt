@@ -1,6 +1,6 @@
 // Package control is the adaptive controller: observe → update beliefs →
 // predict stall risk → take the cheapest safe action. It assigns the three
-// roles (primary, media, standby); the proxy asks for a role, never a node.
+// roles (primary, media); the proxy asks for a role, never a node.
 package control
 
 import (

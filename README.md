@@ -7,9 +7,9 @@ through the [mihomo](https://github.com/metacubex/mihomo) node best suited to it
   *primary* node, the quickest to deliver a page of browsing: low latency and
   enough speed for its images. Images and subtitles come from a local disk cache.
 - **Video** rides a *media* node fast enough for the bitrate, through a 60 s
-  read-ahead buffer, with a warm *standby*. When the media node stalls or
-  fails, the stream resumes on the standby at the next byte, and the player
-  never sees the switch.
+  read-ahead buffer. When the media node stalls or fails, the stream resumes
+  on the best other node at the next byte, and the player never sees the
+  switch.
 
 Nodes rank themselves from real traffic to your Emby server. Each node holds
 a learned belief about its rate and RTT; one controller keeps the predicted
@@ -48,7 +48,7 @@ more than *V* · (1 − (*B* − *B*<sub>min</sub>) / *H*). Each node's rate bel
 is a Normal–Inverse-Gamma posterior on log-rate whose evidence halves every
 2 h; its Student-t predictive gives the probability of falling short. Every
 2 s, each session takes the cheapest action that keeps that probability at or
-under 1%: stay, switch to the standby, switch to the best other node. No byte
+under 1%: stay, or switch to the best other node. No byte
 for 4 s, or a connection error, fails over at once.
 
 Rates are learned from playback alone. Every stream samples its media node,

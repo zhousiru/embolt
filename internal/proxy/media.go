@@ -302,8 +302,8 @@ func (st *stream) push(ctx context.Context, b []byte, cancel context.CancelCause
 }
 
 // resume reopens the remaining range after an interruption. A risk switch
-// goes to the controller's choice; a stall or error fails over to the
-// standby; a pause reopens on the same node once the player has drained half
+// goes to the controller's choice; a stall or error fails over to the best
+// other node; a pause reopens on the same node once the player has drained half
 // the ring. An exploration reads through its node once the player has drained
 // half the ring; whatever ends it, the stream comes back to the media node.
 // If-Range guards against a file that changed: a 200 instead of 206 ends the

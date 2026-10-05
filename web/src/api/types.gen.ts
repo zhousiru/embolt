@@ -33,7 +33,6 @@ export interface NodeRef {
 export interface Session {
   key: string;
   media: NodeRef;
-  standby?: NodeRef;
   streams: number /* int */; // open player connections
   bitrateMbps: number /* float64 */;
   bufferSeconds: number /* float64 */;
@@ -80,7 +79,7 @@ export interface Verdict {
  */
 export interface Choice {
   node: NodeRef;
-  role: string; // media, standby or ""
+  role: string; // media or ""
   gapSeconds: number /* float64 */;
   stallRisk: number /* float64 */;
   stallSeconds: number /* float64 */; // expected over the horizon
@@ -107,7 +106,7 @@ export interface Node {
   rateMbps: Estimate;
   breakerOpen: boolean;
   openUntil?: string;
-  roles: string[]; // primary, media, standby, pinned
+  roles: string[]; // primary, media, pinned
 }
 export interface NodeDetail extends Node {
   samples: Sample[];

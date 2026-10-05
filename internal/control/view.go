@@ -28,7 +28,6 @@ func sessionView(p *Playback) view.Session {
 	return view.Session{
 		Key:           p.key,
 		Media:         ref(p.node),
-		Standby:       refPtr(p.standby),
 		Streams:       len(p.streams),
 		BitrateMbps:   p.bitrate,
 		BufferSeconds: p.buffer.Seconds(),
@@ -41,7 +40,7 @@ func sessionView(p *Playback) view.Session {
 
 // Session shows a live session and the choice its next step faces: every
 // usable node judged at the session's buffer and bitrate, as Step judges
-// them. It reads the standby as is, where Step would re-pick a stale one.
+// them.
 func (c *Controller) Session(key string) view.SessionDetail {
 	d := view.SessionDetail{Choices: []view.Choice{}, Events: []view.Event{}}
 	c.mu.Lock()
@@ -57,17 +56,14 @@ func (c *Controller) Session(key string) view.SessionDetail {
 	if why := c.holds(p, stay, now); why != "" {
 		d.Verdict = &view.Verdict{Reason: why}
 	} else {
-		n, why := c.choose(stay, moves, p.standby)
+		n, why := c.choose(stay, moves)
 		d.Verdict = &view.Verdict{To: refPtr(n), Reason: why}
 	}
 	slices.SortFunc(moves, func(a, b option) int { return cmp.Or(cmp.Compare(a.risk, b.risk), byStall(a, b)) })
 	for i, o := range append([]option{stay}, moves...) {
 		role := ""
-		switch {
-		case i == 0:
+		if i == 0 {
 			role = "media"
-		case o.n == p.standby:
-			role = "standby"
 		}
 		d.Choices = append(d.Choices, view.Choice{
 			Node:         ref(o.n),
@@ -148,7 +144,6 @@ func (c *Controller) roles() map[*nodes.Node][]string {
 	add(c.primary, "primary")
 	for _, p := range c.plays {
 		add(p.node, "media")
-		add(p.standby, "standby")
 	}
 	add(c.pool.Find(cfg.Pins.Primary), "pinned")
 	add(c.pool.Find(cfg.Pins.Media), "pinned")

@@ -11,7 +11,7 @@ function NodeDetail() {
   const limits = useLimits()
   if (n === null) return <Empty>Node not found</Empty>
   if (!n) return null
-  const sessions = (status?.sessions ?? []).filter((s) => s.media.id === id || s.standby?.id === id)
+  const sessions = (status?.sessions ?? []).filter((s) => s.media.id === id)
 
   return (
     <div className="space-y-6">
@@ -53,27 +53,21 @@ function NodeDetail() {
 
       {sessions.length > 0 && (
         <Panel title="Sessions" flush>
-          <Table head={['Session', 'Role', 'Read-ahead', 'Rate']}>
-            {sessions.map((s) => {
-              const media = s.media.id === id
-              return (
-                <tr key={s.key} className={s.streams === 0 ? 'opacity-50' : undefined}>
-                  <td className={td}>
-                    <SessionName s={s} />
-                  </td>
-                  <td className={td}>
-                    <Role role={media ? 'media' : 'standby'} />
-                  </td>
-                  <td className={`${td} w-48`}>
-                    <Buffer seconds={s.bufferSeconds} limits={limits} />
-                  </td>
-                  <td className={td}>
-                    {media ? s.liveMbps.toFixed(1) : '—'}
-                    <span className="text-zinc-500"> / {mbps(s.bitrateMbps)}</span>
-                  </td>
-                </tr>
-              )
-            })}
+          <Table head={['Session', 'Read-ahead', 'Rate']}>
+            {sessions.map((s) => (
+              <tr key={s.key} className={s.streams === 0 ? 'opacity-50' : undefined}>
+                <td className={td}>
+                  <SessionName s={s} />
+                </td>
+                <td className={`${td} w-48`}>
+                  <Buffer seconds={s.bufferSeconds} limits={limits} />
+                </td>
+                <td className={td}>
+                  {s.liveMbps.toFixed(1)}
+                  <span className="text-zinc-500"> / {mbps(s.bitrateMbps)}</span>
+                </td>
+              </tr>
+            ))}
           </Table>
         </Panel>
       )}

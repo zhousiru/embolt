@@ -31,7 +31,6 @@ type NodeRef struct {
 type Session struct {
 	Key           string    `json:"key"`
 	Media         NodeRef   `json:"media"`
-	Standby       *NodeRef  `json:"standby,omitempty"`
 	Streams       int       `json:"streams"` // open player connections
 	BitrateMbps   float64   `json:"bitrateMbps"`
 	BufferSeconds float64   `json:"bufferSeconds"`
@@ -74,7 +73,7 @@ type Verdict struct {
 // node, or switching to another, which delivers nothing for its gap.
 type Choice struct {
 	Node         NodeRef  `json:"node"`
-	Role         string   `json:"role"` // media, standby or ""
+	Role         string   `json:"role"` // media or ""
 	GapSeconds   float64  `json:"gapSeconds"`
 	StallRisk    float64  `json:"stallRisk"`
 	StallSeconds float64  `json:"stallSeconds"` // expected over the horizon
@@ -101,7 +100,7 @@ type Node struct {
 	RateMbps    Estimate  `json:"rateMbps"`
 	BreakerOpen bool      `json:"breakerOpen"`
 	OpenUntil   time.Time `json:"openUntil,omitzero"`
-	Roles       []string  `json:"roles"` // primary, media, standby, pinned
+	Roles       []string  `json:"roles"` // primary, media, pinned
 }
 
 type NodeDetail struct {

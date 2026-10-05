@@ -98,7 +98,7 @@ data_dir: ` + t.TempDir()))
 // TestStepLeavesASaggingNodeAtOnce replays 14:53 of the 2026-10-05 retest:
 // the media node had streamed at ~500 Mbps minutes earlier, then delivered
 // 2.5 and 5.8 Mbps on a 22 Mbps video with nothing buffered. With a healthy
-// standby, the first step with those samples must switch.
+// other node, the first step with those samples must switch.
 func TestStepLeavesASaggingNodeAtOnce(t *testing.T) {
 	c, n := testController(t, map[string][]float64{"a": {517, 571, 353, 692}, "b": {110, 120, 95, 130}})
 	s, err := c.Play("tv/593931", 22.2)

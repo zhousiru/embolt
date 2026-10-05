@@ -38,12 +38,6 @@ function Overview() {
               >
                 <SessionName s={s}>
                   <NodeLink {...s.media} />
-                  {s.standby && (
-                    <>
-                      {' → '}
-                      <NodeLink {...s.standby} />
-                    </>
-                  )}
                 </SessionName>
                 <div>
                   <Buffer seconds={s.bufferSeconds} limits={limits} />

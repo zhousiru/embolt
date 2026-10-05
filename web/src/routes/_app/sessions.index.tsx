@@ -21,7 +21,7 @@ function Sessions() {
       {sessions.length === 0 ? (
         <Empty>Nothing playing</Empty>
       ) : (
-        <Table head={['Session', 'Media / standby', 'Read-ahead', 'Rate', 'Risk', 'Failovers']}>
+        <Table head={['Session', 'Media', 'Read-ahead', 'Rate', 'Risk', 'Failovers']}>
           {sessions.map((s) => (
             <tr key={s.key} className={s.streams === 0 ? 'opacity-50' : undefined}>
               <td className={`${td} max-w-80`}>
@@ -37,7 +37,6 @@ function Sessions() {
               </td>
               <td className={td}>
                 <NodeLink {...s.media} className="block" />
-                {s.standby && <NodeLink {...s.standby} className="block text-xs text-zinc-500" />}
               </td>
               <td className={`${td} w-48`}>
                 <Buffer seconds={s.bufferSeconds} limits={limits} />
