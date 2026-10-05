@@ -1,0 +1,20 @@
+Embolt includes third-party software. Each component keeps its own license.
+
+mihomo — https://github.com/metacubex/mihomo
+  Copyright (c) MetaCubeX and contributors. GPL-3.0; see LICENSE.
+  Embolt embeds mihomo's proxy outbounds and subscription parsers.
+
+Prometheus Go client — https://github.com/prometheus/client_golang
+  Copyright The Prometheus Authors. Apache-2.0.
+
+go.yaml.in/yaml/v3 — https://github.com/yaml/go-yaml
+  Copyright the go-yaml authors. MIT and Apache-2.0.
+
+golang.org/x/sync — https://cs.opensource.google/go/x/sync
+  Copyright The Go Authors. BSD-3-Clause.
+
+The web pane bundles React (MIT), TanStack Router, Query and Start (MIT)
+and Tailwind CSS (MIT).
+
+The full dependency list, with versions, is go.sum and web/bun.lock in the
+source of the release tag that built this image.

@@ -1,0 +1,48 @@
+# Embolt config. Every key has a default; only upstream.url and at least one
+# node source are required. The file reloads on change or SIGHUP.
+
+upstream:
+  url: https://emby.example.com:443
+  # redirect: follow        # follow a 302 to a cloud drive inside the proxy, or "pass" it to the player
+
+# Node sources use mihomo's own schema, so these blocks paste unchanged.
+proxy-providers:
+  main:
+    type: http
+    url: https://provider.example/sub?token=REPLACE_ME
+    interval: 21600         # seconds
+    exclude-filter: '(?:流量|到期|官网|客服|公告|重置)'
+
+# dns:                      # resolves node servers; mihomo's schema, other keys ignored;
+#                           # changes apply after a restart.
+#   default-nameserver:     # IPs only: they resolve the servers below
+#     - tls://223.5.5.5
+#   proxy-server-nameserver:
+#     - https://dns.alidns.com/dns-query
+#     - https://doh.pub/dns-query
+#   ipv6: false             # without a dns section, the OS's servers are used
+
+# proxies:                  # inline nodes, also mihomo's schema
+#   - {name: home, type: direct}
+
+# pins:                     # node name or ID; overrides the controller
+#   primary: ""
+#   media: ""
+
+# control:
+#   stall_risk: 0.01        # target probability of a stall
+#   read_ahead: 60s         # media buffered ahead of the player
+#   half_life: 2h           # how fast old measurements fade
+#   prior_strength: 2       # a new node's prior, in samples; check both with `embolt replay`
+
+# probes:
+#   speed_tests_per_hour: 12
+#   max_new_ips_per_hour: 8 # distinct nodes speed-tested on your token per hour
+
+# listen: ":8096"
+# tls: {listen: ":8920", cert: /config/cert.pem, key: /config/key.pem}
+# web:
+#   listen: ":9090"
+#   basic_auth: {user: admin, password: change-me}
+# cache: {size_mb: 2048}    # images and subtitles, under data_dir/cache
+# data_dir: /data
