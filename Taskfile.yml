@@ -1,0 +1,33 @@
+# https://taskfile.dev — runs the same on Windows, macOS and Linux.
+version: "3"
+
+tasks:
+  gen:
+    desc: Generate web/src/api/types.gen.ts from internal/view
+    cmd: go run github.com/gzuidhof/tygo@v0.2.21 generate
+
+  web:
+    desc: Build the pane into web/dist/client
+    dir: web
+    cmds:
+      - bun install --frozen-lockfile
+      - bun run build
+
+  build:
+    desc: Build bin/embolt with the pane embedded
+    deps: [web]
+    cmd: go build -trimpath -o bin/embolt{{exeExt}} ./cmd/embolt
+
+  test:
+    desc: Vet and test the Go code (no Bun needed)
+    cmds:
+      - go vet -tags noui ./...
+      - go test -tags noui ./...
+
+  dev:
+    desc: Run the backend; run `bun run dev` in web/ for the pane on :3000
+    cmd: go run -tags noui ./cmd/embolt serve --config config.yaml --debug
+
+  image:
+    desc: Build the container image locally
+    cmd: docker build -t embolt:dev .
