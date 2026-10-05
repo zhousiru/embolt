@@ -320,7 +320,8 @@ func (fd *feed) resume(ctx context.Context, cause error) (*http.Response, error)
 	if fd.end >= 0 {
 		rng += strconv.FormatInt(fd.end, 10)
 	}
-	n, reason := fd.node, ""
+	var n *nodes.Node
+	reason := ""
 	var sw switchTo
 	switch {
 	case errors.As(cause, &sw):
