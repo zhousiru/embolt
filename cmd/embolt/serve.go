@@ -80,7 +80,9 @@ func serve(args []string) error {
 	}
 	listen(ctx, g, "pane", cfg.Web.Listen, pane, "", "")
 	slog.Info("embolt started", "version", version, "upstream", cfg.Upstream.Base().Host)
-	return g.Wait()
+	err = g.Wait()
+	px.Close()
+	return err
 }
 
 // listen serves h on addr until ctx ends, then drains for up to 10 s.

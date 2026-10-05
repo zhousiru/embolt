@@ -136,7 +136,9 @@ data_dir: `+t.TempDir()+"\n"+strings.Join(extra, "\n"))
 	stats := measure.NewStats(store, "")
 	ctrl := control.New(store, pool, stats)
 	p, _ := profile.Open("")
-	return New(store, ctrl, stats, cache.Open(t.TempDir(), 1<<20), p), pool
+	s := New(store, ctrl, stats, cache.Open(t.TempDir(), 1<<20), p)
+	t.Cleanup(s.Close)
+	return s, pool
 }
 
 func mustParse(t *testing.T, upstream, extra string) *config.Config {

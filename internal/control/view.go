@@ -28,7 +28,7 @@ func sessionView(p *Playback) view.Session {
 	return view.Session{
 		Key:           p.key,
 		Media:         ref(p.node),
-		Streams:       len(p.streams),
+		Streams:       p.viewers,
 		BitrateMbps:   p.bitrate,
 		BufferSeconds: p.buffer.Seconds(),
 		LiveMbps:      p.live,

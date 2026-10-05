@@ -38,6 +38,7 @@ type Server struct {
 	cache   *cache.Cache
 	profile *profile.Store // used with profile: local
 	catalog *catalog
+	ra      *readAhead
 	links   links
 	rp      *httputil.ReverseProxy
 }
@@ -53,6 +54,7 @@ func New(cfg *config.Store, ctrl *control.Controller, stats *measure.Stats, c *c
 		cache:   c,
 		profile: p,
 		catalog: newCatalog(),
+		ra:      newReadAhead(),
 		links:   links{m: map[string]link{}},
 	}
 	s.rp = &httputil.ReverseProxy{

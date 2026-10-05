@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,11 +25,10 @@ import (
 
 const (
 	chunkSize   = 64 << 10
-	maxRing     = 256 << 20
+	maxWindow   = 256 << 20        // most read-ahead of one file's main read
 	stallAfter  = 4 * time.Second  // no bytes this long: fail over at once
-	pauseLimit  = 30 * time.Second // ring full this long: close the upstream
+	pauseLimit  = 30 * time.Second // read-ahead full this long: close the upstream
 	stepEvery   = 2 * time.Second  // controller evaluation period
-	exploreFor  = 8 * time.Second  // longest stretch read through an explored node
 	maxAttempts = 3
 )
 
@@ -51,30 +49,33 @@ var (
 	chunks = sync.Pool{New: func() any { return new([chunkSize]byte) }}
 )
 
-// switchTo is the cause given when the controller moves a stream.
+// switchTo is the cause given when the controller moves a feed.
 type switchTo struct{ n *nodes.Node }
 
 func (switchTo) Error() string { return "risk" }
 
-// exploreOn is the cause given when the controller has the stream read its
+// exploreOn is the cause given when the controller has the feed read its
 // next stretch through another node.
 type exploreOn struct{ n *nodes.Node }
 
 func (exploreOn) Error() string { return "explore" }
 
-// stream serves one ranged read. A reader fills a memory ring from the media
-// node; the handler drains it to the player. When the node fails, the reader
-// resumes at the end of the buffered data on another node, and the player
-// sees one unbroken response. With the ring full, the reader may refill it
-// through another node for a stretch, a speed test whose bytes are played,
-// then resume on the media node.
-type stream struct {
-	s       *Server
-	play    *control.Stream
-	req     *http.Request // outbound template: target URL and player headers
-	bitrate float64
+// feed fills one span from upstream. It opens the span's range on the
+// session's media node, and when the node fails, resumes at the span's end
+// on another node, so the players reading the span see one unbroken stream.
+// When the session can afford it, it may read the next stretch through
+// another node, a speed test whose bytes are played, then resume on the
+// media node.
+type feed struct {
+	s    *Server
+	sp   *span
+	play *control.Stream // the file's
+	req  *http.Request   // outbound template: target URL and the first player's headers
 
-	// Owned by the reader goroutine.
+	ctx    context.Context // ends when the span goes
+	cancel context.CancelFunc
+
+	// Owned by the feed's goroutine once it runs.
 	node      *nodes.Node
 	off, end  int64 // next byte to fetch; last byte wanted, -1 if unknown
 	total     int64 // full size from Content-Range, -1 if unknown
@@ -82,73 +83,112 @@ type stream struct {
 	exploreTo time.Time // end of the explored stretch
 
 	exploring atomic.Bool // node is an explored node, not the media node
+	meter     meter
 
-	opened   time.Time
-	ring     chan []byte
-	buffered atomic.Int64 // bytes in the ring
-	sent     atomic.Int64 // bytes handed to the player
-	meter    meter
-
-	mu      sync.Mutex
-	current context.CancelCauseFunc // the live upstream attempt
+	mu   sync.Mutex
+	live *attempt // the latest upstream attempt
 }
 
-func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request, target *url.URL) {
-	key, mbps := s.catalog.session(r)
-	play, err := s.ctrl.Play(key, mbps)
-	if err != nil {
-		http.Error(w, "embolt: "+err.Error(), http.StatusBadGateway)
-		return
+// openSpan creates sp's feed and opens its range upstream. On an answer the
+// span can serve, the feed runs and openSpan returns nil, nil. Any other
+// answer is returned for the caller to relay; the span takes no more
+// requests, and its feed ends when the caller detaches.
+func (s *Server) openSpan(sp *span, req *http.Request, key string, mbps float64) (*http.Response, error) {
+	ra := s.ra
+	ra.mu.Lock()
+	if err := sp.f.acquire(s, key, mbps); err != nil {
+		sp.retire()
+		ra.mu.Unlock()
+		return nil, err
 	}
-	defer play.Release()
+	ctx, cancel := context.WithCancel(context.Background())
+	fd := &feed{s: s, sp: sp, play: sp.f.play, req: req.WithContext(ctx), ctx: ctx, cancel: cancel, end: -1, total: -1}
+	sp.feed = fd
+	ra.mu.Unlock()
 
-	out := target.JoinPath(r.URL.EscapedPath())
-	out.RawQuery = r.URL.RawQuery
-	req, _ := http.NewRequest(http.MethodGet, out.String(), nil)
-	req.Header = r.Header.Clone()
-	stripHopByHop(req.Header)
-	s.fixHeaders(req.Header, target)
-
-	st := &stream{s: s, play: play, req: req, bitrate: play.Bitrate(), end: -1, total: -1, opened: time.Now()}
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-	resp, err := st.start(ctx, r.Header.Get("Range"))
-	if err != nil {
-		http.Error(w, "embolt: no node could open the stream", http.StatusBadGateway)
-		return
+	resp, err := fd.start(fmt.Sprintf("bytes=%d-", sp.from))
+	ra.mu.Lock()
+	defer ra.mu.Unlock()
+	switch {
+	case err != nil:
+		sp.retire()
+		return nil, err
+	case !fd.serves(resp, sp.from):
+		sp.dead = true // not retire: that would end the answer's body
+		sp.notify()
+		return resp, nil
+	case sp.dead: // its file changed while it opened
+		resp.Body.Close()
+		return nil, errChanged
 	}
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		relay(w, resp) // 401, 404, 416, a passed-on redirect: the player decides
-		return
-	}
-	st.parseRange(resp)
-	writeHeader(w, resp)
-
-	ringBytes := min(int64(s.cfg.Load().Control.ReadAhead.Seconds()*st.bitrate*1e6/8), maxRing)
-	st.ring = make(chan []byte, max(ringBytes/chunkSize, 16))
-	go st.fill(ctx, resp)
-	go st.supervise(ctx)
-	st.drain(w)
+	header := resp.Header.Clone()
+	stripHopByHop(header)
+	header.Del("Content-Length")
+	header.Del("Content-Range")
+	sp.answered(header, fd.total, fd.end, fd.validator)
+	go fd.run(resp)
+	return nil, nil
 }
 
-// start opens the player's range on the session's media node, failing over
-// if the node cannot connect.
-func (st *stream) start(ctx context.Context, rng string) (*http.Response, error) {
-	n := st.play.Node()
+// serves reports whether resp can fill a span from first: a 206 from that
+// byte, or a 200 of the whole file, of a known size.
+func (fd *feed) serves(resp *http.Response, first int64) bool {
+	switch resp.StatusCode {
+	case http.StatusPartialContent:
+		fd.parseRange(resp)
+		return fd.off == first && fd.total >= 0
+	case http.StatusOK:
+		fd.parseRange(resp)
+		return first == 0 && fd.total >= 0
+	}
+	return false
+}
+
+// redirect ends the feed's live attempt with the cause pick returns, for
+// resume to act on. pick runs only while an attempt is live, so what it
+// picks is acted on, not lost to a feed that is paused or already resuming.
+func (fd *feed) redirect(pick func() error) {
+	fd.mu.Lock()
+	defer fd.mu.Unlock()
+	if a := fd.live; a != nil && a.ctx.Err() == nil {
+		if cause := pick(); cause != nil {
+			a.cancel(cause)
+		}
+	}
+}
+
+// run fills the span until the file ends, the span goes, or no node can
+// continue.
+func (fd *feed) run(resp *http.Response) {
+	err := fd.fill(fd.ctx, resp)
+	ra := fd.s.ra
+	ra.mu.Lock()
+	defer ra.mu.Unlock()
+	fd.sp.done, fd.sp.err = true, err
+	if fd.sp.dropped {
+		return
+	}
+	fd.sp.notify()
+}
+
+// start opens the span's range on the session's media node, failing over if
+// the node cannot connect.
+func (fd *feed) start(rng string) (*http.Response, error) {
+	n := fd.play.Node()
 	for range maxAttempts {
-		resp, err := st.open(ctx, n, rng, "")
+		resp, err := fd.open(fd.ctx, n, rng, "")
 		if err == nil {
-			if n != st.play.Node() {
-				st.play.Switched(n, "error")
+			if n != fd.play.Node() {
+				fd.play.Switched(n, "error")
 			}
-			st.node = n
-			st.meter.restart()
+			fd.node = n
+			fd.meter.restart()
 			return resp, nil
 		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		if fd.ctx.Err() != nil {
+			return nil, fd.ctx.Err()
 		}
-		if n = st.play.Failover(n); n == nil {
+		if n = fd.play.Failover(n); n == nil {
 			break
 		}
 	}
@@ -158,22 +198,23 @@ func (st *stream) start(ctx context.Context, rng string) (*http.Response, error)
 // open sends one upstream attempt on n under its own cancellable context.
 // A redirect-fronted server's 302 is followed on the same node, with the
 // player's headers, and the final link is reused for later seeks.
-func (st *stream) open(ctx context.Context, n *nodes.Node, rng, ifRange string) (*http.Response, error) {
+func (fd *feed) open(ctx context.Context, n *nodes.Node, rng, ifRange string) (*http.Response, error) {
 	actx, cancel := context.WithCancelCause(ctx)
-	req := st.req.Clone(actx)
+	req := fd.req.Clone(actx)
 	setOrDel(req.Header, "Range", rng)
 	setOrDel(req.Header, "If-Range", ifRange)
 
-	resp, err := st.s.fetch(n, req)
-	st.s.observe(ctx, n, err)
+	resp, err := fd.s.fetch(n, req)
+	fd.s.observe(ctx, n, err)
 	if err != nil {
 		cancel(err)
 		return nil, err
 	}
-	st.mu.Lock()
-	st.current = cancel
-	st.mu.Unlock()
-	resp.Body = &attempt{resp.Body, actx, cancel}
+	a := &attempt{resp.Body, actx, cancel}
+	fd.mu.Lock()
+	fd.live = a
+	fd.mu.Unlock()
+	resp.Body = a
 	return resp, nil
 }
 
@@ -200,59 +241,61 @@ func (s *Server) fetch(n *nodes.Node, req *http.Request) (*http.Response, error)
 	return resp, err
 }
 
-// fill copies upstream into the ring, resuming after every interruption
-// until the range is done, the player leaves, or no node can continue.
-func (st *stream) fill(ctx context.Context, resp *http.Response) {
-	defer close(st.ring)
+// fill copies upstream into the span, resuming after every interruption
+// until the range is done, the span goes, or no node can continue.
+func (fd *feed) fill(ctx context.Context, resp *http.Response) error {
 	for {
-		err := st.pump(ctx, resp.Body.(*attempt))
+		err := fd.pump(resp.Body.(*attempt))
 		resp.Body.Close()
 		if err == nil || ctx.Err() != nil {
-			return
+			return err
 		}
-		if resp, err = st.resume(ctx, err); err != nil {
-			if ctx.Err() == nil { // not the player leaving
+		if resp, err = fd.resume(ctx, err); err != nil {
+			if ctx.Err() == nil { // not the span going
 				slog.Warn("stream ended early; the player will re-request", "err", err)
 			}
-			return
+			return err
 		}
 	}
 }
 
-// pump reads one upstream response. Its watchdog fails the attempt when no
-// byte arrives for 4 s while the ring has room.
-func (st *stream) pump(ctx context.Context, a *attempt) error {
+// pump reads one upstream response while the span has room. Its watchdog
+// fails the attempt when no byte arrives for 4 s while it has room.
+func (fd *feed) pump(a *attempt) error {
 	watchdog := time.AfterFunc(stallAfter, func() { a.cancel(errStall) })
 	defer watchdog.Stop()
-	for st.end < 0 || st.off <= st.end {
-		buf := chunks.Get().(*[chunkSize]byte)[:]
+	buf := chunks.Get().(*[chunkSize]byte)
+	defer chunks.Put(buf)
+	ra := fd.s.ra
+	for fd.end < 0 || fd.off <= fd.end {
+		watchdog.Stop()
+		if err := fd.awaitRoom(a); err != nil {
+			return err
+		}
+		watchdog.Reset(stallAfter)
 		t0 := time.Now()
-		n, err := io.ReadFull(a, buf)
-		if s, ok := st.meter.read(n, time.Since(t0)); ok {
-			st.s.stats.Record(st.node, s)
+		n, err := io.ReadFull(a, buf[:])
+		if s, ok := fd.meter.read(n, time.Since(t0)); ok {
+			fd.s.stats.Record(fd.node, s)
 		}
 		if n > 0 {
-			watchdog.Stop()
-			st.buffered.Add(int64(n))
-			if st.exploring.Load() {
+			if fd.exploring.Load() {
 				exploreBytes.Add(float64(n))
 			}
-			perr := st.push(ctx, buf[:n], a.cancel)
-			if perr != nil && !errors.Is(perr, errPaused) && !errors.Is(perr, errExplored) {
-				return perr
+			ra.mu.Lock()
+			kept := fd.sp.append(buf[:n])
+			ra.mu.Unlock()
+			if !kept {
+				return context.Canceled
 			}
-			st.off += int64(n)
-			if perr != nil {
-				return perr
-			}
-			if st.exploring.Load() && time.Now().After(st.exploreTo) {
+			fd.off += int64(n)
+			if fd.exploring.Load() && time.Now().After(fd.exploreTo) {
 				a.cancel(errExplored)
 				return errExplored
 			}
-			watchdog.Reset(stallAfter)
 		}
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			if st.end < 0 || st.off > st.end {
+			if fd.end < 0 || fd.off > fd.end {
 				return nil
 			}
 			err = io.ErrUnexpectedEOF
@@ -264,99 +307,98 @@ func (st *stream) pump(ctx context.Context, a *attempt) error {
 	return nil
 }
 
-// push hands a chunk to the drain. When the ring stays full for 30 s the
-// player has paused; the upstream closes and reopens at the ring's end later.
-// An explored stretch ends as soon as the ring is full again.
-func (st *stream) push(ctx context.Context, b []byte, cancel context.CancelCauseFunc) error {
-	select {
-	case st.ring <- b:
+// awaitRoom waits until the span has room for more. When it stays full for
+// 30 s its players have paused or left: the upstream closes, and reopens at
+// the span's end once there is room. An explored stretch ends as soon as the
+// read-ahead is full. A redirect ends the wait at once.
+func (fd *feed) awaitRoom(a *attempt) error {
+	ra := fd.s.ra
+	ra.mu.Lock()
+	defer ra.mu.Unlock()
+	if fd.sp.room() {
 		return nil
-	default:
 	}
-	if st.exploring.Load() {
-		cancel(errExplored)
-		select {
-		case st.ring <- b:
-			return errExplored
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+	if fd.exploring.Load() {
+		a.cancel(errExplored)
+		return errExplored
 	}
-	st.meter.paused()
+	fd.meter.paused()
 	idle := time.NewTimer(pauseLimit)
 	defer idle.Stop()
-	select {
-	case st.ring <- b:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-idle.C:
-		cancel(errPaused)
+	for !fd.sp.room() {
+		switch fd.sp.waitOr(a.ctx, idle.C) {
+		case cancelled:
+			return context.Cause(a.ctx)
+		case alarmed:
+			a.cancel(errPaused)
+			return errPaused
+		}
 	}
-	select {
-	case st.ring <- b:
-		return errPaused
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return nil
 }
 
 // resume reopens the remaining range after an interruption. A risk switch
 // goes to the controller's choice; a stall or error fails over to the best
-// other node; a pause reopens on the same node once the player has drained half
-// the ring. An exploration reads through its node once the player has drained
-// half the ring; whatever ends it, the stream comes back to the media node.
+// other node, or follows the session if another feed already moved it; a
+// pause reopens on the session's media node once the players have drained
+// half the read-ahead. An exploration reads through its node once they have
+// drained half; whatever ends it, the feed comes back to the media node.
 // If-Range guards against a file that changed: a 200 instead of 206 ends the
-// response.
-func (st *stream) resume(ctx context.Context, cause error) (*http.Response, error) {
-	rng := fmt.Sprintf("bytes=%d-", st.off)
-	if st.end >= 0 {
-		rng += strconv.FormatInt(st.end, 10)
+// feed.
+func (fd *feed) resume(ctx context.Context, cause error) (*http.Response, error) {
+	rng := fmt.Sprintf("bytes=%d-", fd.off)
+	if fd.end >= 0 {
+		rng += strconv.FormatInt(fd.end, 10)
 	}
-	if st.exploring.Load() {
-		st.endExplore(cause)
+	if fd.exploring.Load() {
+		fd.endExplore(cause)
 		cause = errExplored
 	}
-	n, reason := st.node, ""
+	n, reason := fd.node, ""
 	var sw switchTo
 	var ex exploreOn
 	switch {
 	case errors.As(cause, &sw):
 		n, reason = sw.n, "risk"
 	case errors.As(cause, &ex):
-		if err := st.waitForRoom(ctx); err != nil {
+		if err := fd.waitForRoom(ctx); err != nil {
 			return nil, err
 		}
-		if resp := st.explore(ctx, ex.n, rng); resp != nil {
+		if resp := fd.explore(ctx, ex.n, rng); resp != nil {
 			return resp, nil
 		}
 	case errors.Is(cause, errExplored): // back on the media node at the next byte
 	case errors.Is(cause, errPaused):
-		if err := st.waitForRoom(ctx); err != nil {
+		if err := fd.waitForRoom(ctx); err != nil {
 			return nil, err
 		}
+		n = fd.play.Node()
 	default:
 		reason = "error"
 		if errors.Is(cause, errStall) {
 			reason = "stall"
 		}
-		st.s.stats.Record(st.node, measure.Sample{Kind: measure.KindPassive, Err: measure.Redact(cause)})
-		n = st.play.Failover(st.node)
+		fd.s.stats.Record(fd.node, measure.Sample{Kind: measure.KindPassive, Err: measure.Redact(cause)})
+		if n = fd.play.Node(); n == fd.node {
+			n = fd.play.Failover(fd.node)
+		}
 	}
 	for range maxAttempts {
 		if n == nil {
 			break
 		}
-		resp, err := st.open(ctx, n, rng, st.validator)
+		resp, err := fd.open(ctx, n, rng, fd.validator)
 		switch {
 		case err != nil:
-		case resp.StatusCode == http.StatusPartialContent && st.sameFile(resp):
-			if n != st.node {
-				st.play.Switched(n, reason)
-				st.node = n
-				st.meter.moved()
+		case resp.StatusCode == http.StatusPartialContent && fd.sameFile(resp):
+			if n != fd.node {
+				fd.node = n
+				fd.meter.moved()
 			} else {
-				st.meter.restart()
+				fd.meter.restart()
+			}
+			if n != fd.play.Node() {
+				fd.play.Switched(n, reason)
 			}
 			return resp, nil
 		case resp.StatusCode == http.StatusOK:
@@ -369,139 +411,75 @@ func (st *stream) resume(ctx context.Context, cause error) (*http.Response, erro
 			return nil, ctx.Err()
 		}
 		reason = cmp.Or(reason, "error")
-		n = st.play.Failover(n)
+		n = fd.play.Failover(n)
 	}
 	return nil, control.ErrNoNode
 }
 
-// explore reopens the rest of the range on n for up to exploreFor, or until
-// the ring is full again. It returns nil, and the stream stays on its node,
-// when n cannot serve the range.
-func (st *stream) explore(ctx context.Context, n *nodes.Node, rng string) *http.Response {
-	resp, err := st.open(ctx, n, rng, st.validator)
+// explore reopens the rest of the range on n for up to a stretch, or until
+// the read-ahead is full again. It returns nil, and the feed stays on its
+// node, when n cannot serve the range.
+func (fd *feed) explore(ctx context.Context, n *nodes.Node, rng string) *http.Response {
+	resp, err := fd.open(ctx, n, rng, fd.validator)
 	switch {
 	case err != nil:
 		return nil
-	case resp.StatusCode == http.StatusPartialContent && st.sameFile(resp):
-		st.node, st.exploreTo = n, time.Now().Add(exploreFor)
-		st.exploring.Store(true)
-		st.meter.explored()
+	case resp.StatusCode == http.StatusPartialContent && fd.sameFile(resp):
+		fd.node, fd.exploreTo = n, time.Now().Add(control.ExploreStretch)
+		fd.exploring.Store(true)
+		fd.meter.explored()
 		return resp
 	case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests:
-		st.s.ctrl.Refused()
+		fd.s.ctrl.Refused()
 	}
 	resp.Body.Close()
 	return nil
 }
 
-// endExplore puts the stream back on the session's media node. The stretch's
+// endExplore puts the feed back on the session's media node. The stretch's
 // last sample counts for the explored node, and so does a failure: it never
 // counts against the session's media node.
-func (st *stream) endExplore(cause error) {
-	if s, ok := st.meter.home(); ok {
-		st.s.stats.Record(st.node, s)
+func (fd *feed) endExplore(cause error) {
+	if s, ok := fd.meter.home(); ok {
+		fd.s.stats.Record(fd.node, s)
 	}
 	if !errors.Is(cause, errExplored) {
-		st.s.stats.Record(st.node, measure.Sample{Kind: measure.KindExplore, Err: measure.Redact(cause)})
+		fd.s.stats.Record(fd.node, measure.Sample{Kind: measure.KindExplore, Err: measure.Redact(cause)})
 	}
-	slog.Debug("explored", "node", st.node.Name, "end", cause)
-	st.exploring.Store(false)
-	st.node = st.play.Node()
+	slog.Debug("explored", "node", fd.node.Name, "end", cause)
+	fd.exploring.Store(false)
+	fd.node = fd.play.Node()
 }
 
-func (st *stream) waitForRoom(ctx context.Context) error {
-	tick := time.NewTicker(500 * time.Millisecond)
-	defer tick.Stop()
-	for len(st.ring) > cap(st.ring)/2 {
-		select {
-		case <-ctx.Done():
+// waitForRoom waits until the span's players have drained half its
+// read-ahead.
+func (fd *feed) waitForRoom(ctx context.Context) error {
+	ra := fd.s.ra
+	ra.mu.Lock()
+	defer ra.mu.Unlock()
+	for !fd.sp.room() || fd.sp.ahead() > fd.sp.target()/2 {
+		if !fd.sp.wait(ctx) {
 			return ctx.Err()
-		case <-tick.C:
 		}
 	}
 	return nil
 }
 
-// supervise runs the controller step for this stream every 2 s.
-func (st *stream) supervise(ctx context.Context) {
-	tick := time.NewTicker(stepEvery)
-	defer tick.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-tick.C:
-			full, recent := st.meter.take()
-			if st.exploring.Load() {
-				continue // the media node is not reading: nothing to judge it by
-			}
-			obs := control.Observation{
-				ReadAhead: st.media(st.buffered.Load()),
-				Delivered: st.media(st.sent.Load()),
-				Elapsed:   time.Since(st.opened),
-				Full:      full,
-				Recent:    recent,
-			}
-			var cause error
-			if n := st.play.Step(obs); n != nil {
-				cause = switchTo{n}
-			} else if n := st.play.Explore(obs); n != nil {
-				cause = exploreOn{n}
-			}
-			if cause != nil {
-				st.mu.Lock()
-				st.current(cause)
-				st.mu.Unlock()
-			}
-		}
-	}
-}
-
-// drain writes the ring to the player until it ends or the player leaves.
-func (st *stream) drain(w io.Writer) {
-	for {
-		var b []byte
-		var ok bool
-		select {
-		case b, ok = <-st.ring:
-		default:
-			t0 := time.Now()
-			b, ok = <-st.ring
-			underrun.Add(time.Since(t0).Seconds())
-		}
-		if !ok {
-			return
-		}
-		st.buffered.Add(-int64(len(b)))
-		n, err := w.Write(b)
-		st.sent.Add(int64(n))
-		chunks.Put((*[chunkSize]byte)(b[:chunkSize]))
-		if err != nil {
-			return // the player closed: a seek or a stop
-		}
-	}
-}
-
-// media converts bytes to seconds of media at the session's bitrate.
-func (st *stream) media(bytes int64) time.Duration {
-	return time.Duration(float64(bytes) * 8 / (st.bitrate * 1e6) * float64(time.Second))
-}
-
-func (st *stream) parseRange(resp *http.Response) {
-	st.validator = resp.Header.Get("ETag")
-	if st.validator == "" || strings.HasPrefix(st.validator, "W/") {
-		st.validator = resp.Header.Get("Last-Modified")
+func (fd *feed) parseRange(resp *http.Response) {
+	fd.validator = resp.Header.Get("ETag")
+	if fd.validator == "" || strings.HasPrefix(fd.validator, "W/") {
+		fd.validator = resp.Header.Get("Last-Modified")
 	}
 	if first, last, total, ok := contentRange(resp.Header.Get("Content-Range")); ok {
-		st.off, st.end, st.total = first, last, total
+		fd.off, fd.end, fd.total = first, last, total
 	} else if resp.ContentLength >= 0 {
-		st.off, st.end, st.total = 0, resp.ContentLength-1, resp.ContentLength
+		fd.off, fd.end, fd.total = 0, resp.ContentLength-1, resp.ContentLength
 	}
 }
 
-func (st *stream) sameFile(resp *http.Response) bool {
+func (fd *feed) sameFile(resp *http.Response) bool {
 	first, _, total, ok := contentRange(resp.Header.Get("Content-Range"))
-	return ok && first == st.off && (st.total < 0 || total == st.total)
+	return ok && first == fd.off && (fd.total < 0 || total == fd.total)
 }
 
 // contentRange parses "bytes first-last/total"; total is -1 for "*".

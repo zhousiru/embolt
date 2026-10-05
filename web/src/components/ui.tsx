@@ -88,7 +88,7 @@ export function Range({ e, unit, digits = 0 }: { e: Estimate; unit: string; digi
   )
 }
 
-/** Read-ahead fill against the ring, with the low mark. */
+/** Read-ahead in seconds against its full length, with the low mark. */
 export function Buffer({ seconds, limits }: { seconds: number; limits: Limits }) {
   const max = limits.readAheadSeconds
   const low = limits.bufferMinSeconds

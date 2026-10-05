@@ -52,13 +52,15 @@ under 1%: stay, or switch to the best other node. No byte
 for 4 s, or a connection error, fails over at once.
 
 Rates are learned from playback alone. Every stream samples its media node,
-and while a session's read-ahead is full it explores, at most every 3 min:
-once the player has drained half of it, the next stretch (up to 8 s, or until
-it is full again) is read through another node, then the stream resumes on
-its media node at the next byte. The node is picked by Thompson sampling, one
-draw from each node's rate posterior, so barely measured nodes that may be
-fast are tried first, known fallbacks stay fresh, and known slow nodes are
-left alone. A test costs no extra bytes and no second connection.
+and a session explores, at most once a minute, whenever it can afford a test
+that fails: from a read-ahead at most half full, the next stretch (up to 8 s,
+or until it is full) is read through another node, then the stream resumes
+on its media node at the next byte. It can afford one when, losing the whole
+stretch and the gaps of switching there and back, it would still hold 10 s and
+its media node keep the stall risk under 1%. The node is picked by Thompson
+sampling, one draw from each node's rate posterior, so barely measured nodes
+that may be fast are tried first, known fallbacks stay fresh, and known slow
+nodes are left alone. A test costs no extra bytes and no second connection.
 `embolt replay` runs the model over the logged samples and reports
 how well calibrated it is, to tune `half_life` and `prior_strength` on your
 own data:

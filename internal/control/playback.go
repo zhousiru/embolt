@@ -14,8 +14,12 @@ import (
 const (
 	minSwitchGap = 20 * time.Second
 	switchRamp   = time.Second // a new node's ramp-up before it delivers
-	exploreGap   = 3 * time.Minute
+	exploreGap   = time.Minute
 )
+
+// ExploreStretch is the longest stretch a session reads through an explored
+// node.
+const ExploreStretch = 8 * time.Second
 
 // StreamMemory is how far back a stream's own rate samples count.
 const StreamMemory = 30 * time.Second
@@ -24,6 +28,8 @@ const StreamMemory = 30 * time.Second
 // the media node and the controller's view of the buffer.
 // Seeks and the player's side connections join the same Playback, so the
 // session keeps one exit IP.
+// A playback lasts while it has a stream: a file it reads from upstream,
+// which any number of player connections read.
 type Playback struct {
 	c       *Controller
 	key     string
@@ -36,6 +42,7 @@ type Playback struct {
 	explored  time.Time // last read a stretch through another node
 	failovers int
 	streams   map[*Stream]struct{}
+	viewers   int // player connections
 	idle      time.Time
 	buffer    time.Duration
 	live      float64
@@ -44,16 +51,17 @@ type Playback struct {
 	risk      float64
 }
 
-// Stream is one player connection within a playback.
+// Stream is one file a playback reads from upstream, judged as a whole: its
+// observation covers every region the player reads.
 type Stream struct {
 	*Playback
-	delivered time.Duration // media handed to the player; guarded by c.mu
+	delivered time.Duration // media handed to players; guarded by c.mu
 }
 
 // Observation is what a stream reports at each step.
 type Observation struct {
 	ReadAhead time.Duration // media in Embolt's read-ahead
-	Delivered time.Duration // media handed to the player since the stream opened
+	Delivered time.Duration // media handed to players since the stream opened
 	Elapsed   time.Duration // since the stream opened
 	Full      bool          // the read-ahead filled since the last step
 	Recent    []float64     // the stream's rate samples (Mbps) within StreamMemory
@@ -90,6 +98,19 @@ func (c *Controller) Play(key string, bitrate float64) (*Stream, error) {
 	s := &Stream{Playback: p}
 	p.streams[s] = struct{}{}
 	return s, nil
+}
+
+// Watch counts a player connection reading the playback until done is
+// called.
+func (p *Playback) Watch() (done func()) {
+	p.c.mu.Lock()
+	p.viewers++
+	p.c.mu.Unlock()
+	return func() {
+		p.c.mu.Lock()
+		p.viewers--
+		p.c.mu.Unlock()
+	}
 }
 
 func (s *Stream) Release() {
@@ -181,26 +202,33 @@ func (s *Stream) Step(o Observation) *nodes.Node {
 
 // Explore picks a node to read the session's next stretch through, or nil:
 // a speed test whose bytes are played, and the only test Embolt runs. It
-// runs only when the read-ahead has filled, so the media node keeps up and
-// the buffer can carry a test, at most once per exploreGap, on a node picked
-// by Thompson sampling, within the exit-IP cap. The stream comes back to
-// the media node afterwards: a faster node is no reason to move a session
-// that meets its target, but it informs the next pick and failover.
-func (s *Stream) Explore(o Observation) *nodes.Node {
+// runs whenever the session can afford the test failing, at most once per
+// exploreGap: a test starts from a read-ahead at most half full, and if the
+// node delivers nothing for the whole stretch and the gaps of switching to
+// it and back, at least BufferMin must be left, from which the media node
+// still meets the target. Nodes are ranked by Thompson sampling, and the
+// first affordable one within the exit-IP cap is tested. The stream comes
+// back to the media node afterwards: a faster node is no reason to move a
+// session that meets its target, but it informs the next pick and failover.
+// Call it after Step, which updates the session's buffer.
+func (s *Stream) Explore() *nodes.Node {
 	p, c := s.Playback, s.c
 	cfg := c.cfg.Load()
-	if !o.Full {
-		return nil
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()
-	if s.delivered = o.Delivered; !s.leads() || now.Before(c.refused) ||
+	if !s.leads() || now.Before(c.refused) ||
 		now.Sub(p.switched) < minSwitchGap || now.Sub(p.explored) < exploreGap ||
-		c.pinned(cfg.Pins.Media) == p.node {
+		c.pinned(cfg.Pins.Media) == p.node || c.open(p.node) {
 		return nil
 	}
-	n := c.firstWithinIPCap(c.explorable(c.busy(), now), now)
+	rate := streamRate(cfg.Control, c.stats.StateAt(p.node, now).Rate, p.recent, now)
+	left := min(p.buffer, cfg.Control.ReadAhead/2) - ExploreStretch - c.switchGap(p.node)
+	unaffordable := func(n *nodes.Node) bool {
+		b := left - c.switchGap(n)
+		return b < BufferMin || stallRisk(rate, b, p.bitrate) > cfg.Control.StallRisk
+	}
+	n := c.firstWithinIPCap(slices.DeleteFunc(c.explorable(c.busy(), now), unaffordable), now)
 	if n == nil {
 		return nil
 	}

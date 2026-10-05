@@ -238,22 +238,32 @@ func TestUnknownBitrateUsesTheRecentPeak(t *testing.T) {
 	}
 }
 
-// TestExploreOnlyWithAFullReadAhead: a session tests another node from its
-// read-ahead only once the read-ahead has filled, and not again within the gap.
-func TestExploreOnlyWithAFullReadAhead(t *testing.T) {
-	c, n := testController(t, map[string][]float64{"a": {25, 24, 26}})
-	s, _ := c.Play("tv/1", 22.2)
+// TestExploreWhenAffordable: a session tests another node whenever its
+// buffer can absorb the test failing, full read-ahead or not, and not again
+// within the gap. A short buffer cannot absorb it.
+func TestExploreWhenAffordable(t *testing.T) {
+	healthy := map[string][]float64{"a": {25, 24, 26}, "b": {25, 24, 26}}
+	c, n := testController(t, healthy)
+	s, _ := c.Play("tv/1", 5)
 	other := n["a"]
 	if s.Node() == other {
 		other = n["b"]
 	}
-	if got := s.Explore(Observation{Recent: []float64{25}}); got != nil {
-		t.Fatalf("explored %v with room in the read-ahead", got)
+	if got := s.Explore(); got != nil {
+		t.Fatalf("explored %v with nothing buffered", got)
 	}
-	if got := s.Explore(Observation{Full: true}); got != other {
-		t.Fatalf("Explore = %v, want %v", got, other)
+	s.Step(Observation{ReadAhead: 35 * time.Second, Recent: []float64{25}})
+	if got := s.Explore(); got != other {
+		t.Fatalf("with 35 s of a 60 s read-ahead: Explore = %v, want %v", got, other)
 	}
-	if got := s.Explore(Observation{Full: true}); got != nil {
+	if got := s.Explore(); got != nil {
 		t.Errorf("explored %v again within %v", got, exploreGap)
+	}
+
+	c, _ = testController(t, healthy)
+	s, _ = c.Play("tv/2", 5)
+	s.Step(Observation{ReadAhead: 12 * time.Second, Recent: []float64{25}})
+	if got := s.Explore(); got != nil {
+		t.Errorf("with 12 s buffered, explored %v: a failed test would stall", got)
 	}
 }
