@@ -1,6 +1,6 @@
 // Package control is the adaptive controller: observe → update beliefs →
-// predict stall risk → take the cheapest safe action. It assigns the three
-// roles (primary, media); the proxy asks for a role, never a node.
+// predict stall risk → take the cheapest safe action. It assigns the two
+// roles, primary and media; the proxy asks for a role, never a node.
 package control
 
 import (
@@ -281,19 +281,14 @@ func (c *Controller) pinned(ref string) *nodes.Node {
 
 // quickest ranks by the 90% upper bound of the burst time. A node with no
 // speed data keeps a wide pooled prior, so it ranks behind a measured node of
-// the same speed.
+// the same speed; one with no measured RTT ranks last, as in rttKey.
 func (c *Controller) quickest(ns []*nodes.Node) *nodes.Node {
-	return minBy(c.rttMeasured(ns), func(n *nodes.Node) float64 { return c.burst(n).upper() })
-}
-
-// rttMeasured keeps the nodes with a measured RTT, if there are any, so a
-// guess never beats a measurement.
-func (c *Controller) rttMeasured(ns []*nodes.Node) []*nodes.Node {
-	measured := slices.DeleteFunc(slices.Clone(ns), func(n *nodes.Node) bool { return !c.stats.State(n).RTT.Measured() })
-	if len(measured) > 0 {
-		return measured
-	}
-	return ns
+	return minBy(ns, func(n *nodes.Node) float64 {
+		if !c.stats.State(n).RTT.Measured() {
+			return math.Inf(1)
+		}
+		return c.burst(n).upper()
+	})
 }
 
 func (c *Controller) burst(n *nodes.Node) timing {
