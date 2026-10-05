@@ -15,6 +15,7 @@ const (
 	minSwitchGap   = 20 * time.Second
 	standbyRefresh = 5 * time.Minute
 	switchRamp     = time.Second // a new node's ramp-up before it delivers
+	exploreGap     = 3 * time.Minute
 )
 
 // StreamMemory is how far back a stream's own rate samples count.
@@ -35,6 +36,7 @@ type Playback struct {
 	standby   *nodes.Node
 	standbyAt time.Time
 	switched  time.Time
+	explored  time.Time // last read a stretch through another node
 	failovers int
 	streams   map[*Stream]struct{}
 	idle      time.Time
@@ -177,6 +179,36 @@ func (s *Stream) Step(o Observation) *nodes.Node {
 	}
 	n, _ := c.choose(stay, c.weighMoves(p, c.standbyFor(p), now))
 	return n
+}
+
+// Explore picks a node to read the session's next stretch through, or nil:
+// a speed test whose bytes are played. It runs only when the read-ahead has
+// filled, so the media node keeps up and the buffer can carry a test, at most
+// once per exploreGap, on the node whose result is worth the most (as
+// speedRound picks), within the same exit-IP cap. The stream comes back to
+// the media node afterwards: a faster node is no reason to move a session
+// that meets its target, but it informs the next pick, standby and failover.
+func (s *Stream) Explore(o Observation) *nodes.Node {
+	p, c := s.Playback, s.c
+	cfg := c.cfg.Load()
+	if !o.Full || !cfg.Probes.Explore {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	if s.delivered = o.Delivered; !s.leads() || now.Before(c.refused) ||
+		now.Sub(p.switched) < minSwitchGap || now.Sub(p.explored) < exploreGap ||
+		c.pinned(cfg.Pins.Media) == p.node {
+		return nil
+	}
+	picks := c.withinIPCap(c.ranked(c.busy(), p.bitrate, now), now, 1)
+	if len(picks) == 0 {
+		return nil
+	}
+	p.explored, c.explored = now, now
+	slog.Debug("exploring", "session", p.key, "media", p.node.Name, "node", picks[0].Name)
+	return picks[0]
 }
 
 // option is one action the step weighs.

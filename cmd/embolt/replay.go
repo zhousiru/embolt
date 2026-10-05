@@ -64,8 +64,10 @@ func replay(args []string) error {
 		if s.Kind == measure.KindPing && s.Err == "" && s.TTFB > 0 {
 			rtt.add(st.RTT.Predictive().CDF(math.Log(float64(s.TTFB) / float64(time.Millisecond))))
 		}
-		if s.Kind == measure.KindSpeed {
-			probeBytes += s.Bytes
+		if s.Kind == measure.KindSpeed || s.Kind == measure.KindExplore {
+			if s.Kind == measure.KindSpeed {
+				probeBytes += s.Bytes
+			}
 			if h := s.Time.Truncate(time.Hour); !h.Equal(hour) {
 				hour, hourIPs = h, map[string]bool{}
 			}

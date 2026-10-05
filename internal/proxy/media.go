@@ -30,17 +30,23 @@ const (
 	stallAfter  = 4 * time.Second  // no bytes this long: fail over at once
 	pauseLimit  = 30 * time.Second // ring full this long: close the upstream
 	stepEvery   = 2 * time.Second  // controller evaluation period
+	exploreFor  = 8 * time.Second  // longest stretch read through an explored node
 	maxAttempts = 3
 )
 
 var (
-	errStall   = errors.New("stall")
-	errPaused  = errors.New("paused")
-	errChanged = errors.New("file changed upstream")
+	errStall    = errors.New("stall")
+	errPaused   = errors.New("paused")
+	errChanged  = errors.New("file changed upstream")
+	errExplored = errors.New("explored") // the stretch is done: back to the media node
 
 	underrun = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "embolt_session_stall_seconds_total",
 		Help: "Seconds player connections waited on an empty read-ahead buffer.",
+	})
+	exploreBytes = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "embolt_explore_bytes_total",
+		Help: "Bytes of playback read through explored nodes; all of it is played.",
 	})
 	chunks = sync.Pool{New: func() any { return new([chunkSize]byte) }}
 )
@@ -50,10 +56,18 @@ type switchTo struct{ n *nodes.Node }
 
 func (switchTo) Error() string { return "risk" }
 
+// exploreOn is the cause given when the controller has the stream read its
+// next stretch through another node.
+type exploreOn struct{ n *nodes.Node }
+
+func (exploreOn) Error() string { return "explore" }
+
 // stream serves one ranged read. A reader fills a memory ring from the media
 // node; the handler drains it to the player. When the node fails, the reader
 // resumes at the end of the buffered data on another node, and the player
-// sees one unbroken response.
+// sees one unbroken response. With the ring full, the reader may refill it
+// through another node for a stretch, a speed test whose bytes are played,
+// then resume on the media node.
 type stream struct {
 	s       *Server
 	play    *control.Stream
@@ -65,6 +79,9 @@ type stream struct {
 	off, end  int64 // next byte to fetch; last byte wanted, -1 if unknown
 	total     int64 // full size from Content-Range, -1 if unknown
 	validator string
+	exploreTo time.Time // end of the explored stretch
+
+	exploring atomic.Bool // node is an explored node, not the media node
 
 	opened   time.Time
 	ring     chan []byte
@@ -218,13 +235,20 @@ func (st *stream) pump(ctx context.Context, a *attempt) error {
 		if n > 0 {
 			watchdog.Stop()
 			st.buffered.Add(int64(n))
+			if st.exploring.Load() {
+				exploreBytes.Add(float64(n))
+			}
 			perr := st.push(ctx, buf[:n], a.cancel)
-			if perr != nil && !errors.Is(perr, errPaused) {
+			if perr != nil && !errors.Is(perr, errPaused) && !errors.Is(perr, errExplored) {
 				return perr
 			}
 			st.off += int64(n)
 			if perr != nil {
 				return perr
+			}
+			if st.exploring.Load() && time.Now().After(st.exploreTo) {
+				a.cancel(errExplored)
+				return errExplored
 			}
 			watchdog.Reset(stallAfter)
 		}
@@ -243,11 +267,21 @@ func (st *stream) pump(ctx context.Context, a *attempt) error {
 
 // push hands a chunk to the drain. When the ring stays full for 30 s the
 // player has paused; the upstream closes and reopens at the ring's end later.
+// An explored stretch ends as soon as the ring is full again.
 func (st *stream) push(ctx context.Context, b []byte, cancel context.CancelCauseFunc) error {
 	select {
 	case st.ring <- b:
 		return nil
 	default:
+	}
+	if st.exploring.Load() {
+		cancel(errExplored)
+		select {
+		case st.ring <- b:
+			return errExplored
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	st.meter.paused()
 	idle := time.NewTimer(pauseLimit)
@@ -271,14 +305,33 @@ func (st *stream) push(ctx context.Context, b []byte, cancel context.CancelCause
 // resume reopens the remaining range after an interruption. A risk switch
 // goes to the controller's choice; a stall or error fails over to the
 // standby; a pause reopens on the same node once the player has drained half
-// the ring. If-Range guards against a file that changed: a 200 instead of 206
-// ends the response.
+// the ring. An exploration reads through its node once the player has drained
+// half the ring; whatever ends it, the stream comes back to the media node.
+// If-Range guards against a file that changed: a 200 instead of 206 ends the
+// response.
 func (st *stream) resume(ctx context.Context, cause error) (*http.Response, error) {
+	rng := fmt.Sprintf("bytes=%d-", st.off)
+	if st.end >= 0 {
+		rng += strconv.FormatInt(st.end, 10)
+	}
+	if st.exploring.Load() {
+		st.endExplore(cause)
+		cause = errExplored
+	}
 	n, reason := st.node, ""
 	var sw switchTo
+	var ex exploreOn
 	switch {
 	case errors.As(cause, &sw):
 		n, reason = sw.n, "risk"
+	case errors.As(cause, &ex):
+		if err := st.waitForRoom(ctx); err != nil {
+			return nil, err
+		}
+		if resp := st.explore(ctx, ex.n, rng); resp != nil {
+			return resp, nil
+		}
+	case errors.Is(cause, errExplored): // back on the media node at the next byte
 	case errors.Is(cause, errPaused):
 		if err := st.waitForRoom(ctx); err != nil {
 			return nil, err
@@ -290,10 +343,6 @@ func (st *stream) resume(ctx context.Context, cause error) (*http.Response, erro
 		}
 		st.s.stats.Record(st.node, measure.Sample{Kind: measure.KindPassive, Err: measure.Redact(cause)})
 		n = st.play.Failover(st.node)
-	}
-	rng := fmt.Sprintf("bytes=%d-", st.off)
-	if st.end >= 0 {
-		rng += strconv.FormatInt(st.end, 10)
 	}
 	for range maxAttempts {
 		if n == nil {
@@ -326,6 +375,41 @@ func (st *stream) resume(ctx context.Context, cause error) (*http.Response, erro
 	return nil, control.ErrNoNode
 }
 
+// explore reopens the rest of the range on n for up to exploreFor, or until
+// the ring is full again. It returns nil, and the stream stays on its node,
+// when n cannot serve the range.
+func (st *stream) explore(ctx context.Context, n *nodes.Node, rng string) *http.Response {
+	resp, err := st.open(ctx, n, rng, st.validator)
+	switch {
+	case err != nil:
+		return nil
+	case resp.StatusCode == http.StatusPartialContent && st.sameFile(resp):
+		st.node, st.exploreTo = n, time.Now().Add(exploreFor)
+		st.exploring.Store(true)
+		st.meter.explored()
+		return resp
+	case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests:
+		st.s.ctrl.Refused()
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// endExplore puts the stream back on the session's media node. The stretch's
+// last sample counts for the explored node, and so does a failure: it never
+// counts against the session's media node.
+func (st *stream) endExplore(cause error) {
+	if s, ok := st.meter.home(); ok {
+		st.s.stats.Record(st.node, s)
+	}
+	if !errors.Is(cause, errExplored) {
+		st.s.stats.Record(st.node, measure.Sample{Kind: measure.KindExplore, Err: measure.Redact(cause)})
+	}
+	slog.Debug("explored", "node", st.node.Name, "end", cause)
+	st.exploring.Store(false)
+	st.node = st.play.Node()
+}
+
 func (st *stream) waitForRoom(ctx context.Context) error {
 	tick := time.NewTicker(500 * time.Millisecond)
 	defer tick.Stop()
@@ -349,6 +433,9 @@ func (st *stream) supervise(ctx context.Context) {
 			return
 		case <-tick.C:
 			full, recent := st.meter.take()
+			if st.exploring.Load() {
+				continue // the media node is not reading: nothing to judge it by
+			}
 			obs := control.Observation{
 				ReadAhead: st.media(st.buffered.Load()),
 				Delivered: st.media(st.sent.Load()),
@@ -356,9 +443,15 @@ func (st *stream) supervise(ctx context.Context) {
 				Full:      full,
 				Recent:    recent,
 			}
+			var cause error
 			if n := st.play.Step(obs); n != nil {
+				cause = switchTo{n}
+			} else if n := st.play.Explore(obs); n != nil {
+				cause = exploreOn{n}
+			}
+			if cause != nil {
 				st.mu.Lock()
-				st.current(switchTo{n})
+				st.current(cause)
 				st.mu.Unlock()
 			}
 		}

@@ -44,6 +44,7 @@ const (
 	KindPing    Kind = "ping"
 	KindSpeed   Kind = "speed"
 	KindPassive Kind = "passive"
+	KindExplore Kind = "explore" // playback read through another node for a stretch
 )
 
 // Sample is one measurement of a node's route to the Emby server.
@@ -133,7 +134,7 @@ func (s *Stats) Record(n *nodes.Node, smp Sample) {
 	}
 	if r := smp.Mbps(); r > 0 {
 		w := 1.0
-		if smp.Kind != KindPassive {
+		if smp.Kind == KindSpeed {
 			w = ProbeWeight
 		}
 		e.Rate.Observe(math.Log(r), w, smp.Time, hl)

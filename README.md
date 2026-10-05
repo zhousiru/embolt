@@ -53,7 +53,13 @@ for 4 s, or a connection error, fails over at once.
 
 Speed tests read the file being played, with the player's own token, from the
 nodes whose result would most lower the expected stall time (the knowledge
-gradient), so probing goes where doubt could change a decision. `embolt replay` runs the model over the logged samples and reports
+gradient), so probing goes where doubt could change a decision. While a
+session's read-ahead is full, it explores instead: once the player has drained
+half of it, the next stretch (up to 8 s, or until it is full again) is read
+through the node worth testing most, then the stream resumes on its media node
+at the next byte. The test costs no extra bytes and no second connection, and
+the speed-test schedule pauses while sessions explore.
+`embolt replay` runs the model over the logged samples and reports
 how well calibrated it is, to tune `half_life` and `prior_strength` on your
 own data:
 

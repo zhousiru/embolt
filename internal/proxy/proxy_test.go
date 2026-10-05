@@ -107,6 +107,15 @@ func TestFailoverMidStream(t *testing.T) {
 
 func newTestProxy(t *testing.T, upstream string) *httptest.Server {
 	t.Helper()
+	s, _ := newTestServer(t, upstream)
+	srv := httptest.NewServer(s)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// newTestServer has two direct nodes, a and b.
+func newTestServer(t *testing.T, upstream string) (*Server, *nodes.Pool) {
+	t.Helper()
 	// Two direct nodes; udp differs only to give them distinct IDs.
 	cfg := mustParse(t, upstream, `
 proxies:
@@ -125,9 +134,7 @@ data_dir: `+t.TempDir())
 	}
 	stats := measure.NewStats(store, "")
 	ctrl := control.New(store, pool, stats)
-	srv := httptest.NewServer(New(store, ctrl, stats, cache.Open(t.TempDir(), 1<<20)))
-	t.Cleanup(srv.Close)
-	return srv
+	return New(store, ctrl, stats, cache.Open(t.TempDir(), 1<<20)), pool
 }
 
 func mustParse(t *testing.T, upstream, extra string) *config.Config {

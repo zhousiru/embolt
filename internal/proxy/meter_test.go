@@ -4,6 +4,8 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/zhousiru/embolt/internal/measure"
 )
 
 // read feeds the meter chunks of 64 KB at mbps and returns the sample rates.
@@ -57,5 +59,42 @@ func TestMeterCountsAStall(t *testing.T) {
 	got := readAt(&m, 0.2, 3*time.Second) // a node down to 0.2 Mbps
 	if len(got) == 0 || got[0] > 0.5 {
 		t.Fatalf("stalled reading: %v, want a very slow sample", got)
+	}
+}
+
+func TestMeterKeepsExploredSamplesApart(t *testing.T) {
+	var m meter
+	m.restart()
+	readAt(&m, 40, 6*time.Second)
+
+	m.explored()
+	per := time.Duration(float64(chunkSize*8) / 100e6 * float64(time.Second))
+	explored := 0
+	for d := time.Duration(0); d < 5*time.Second; d += per {
+		if s, ok := m.read(chunkSize, per); ok {
+			if s.Kind != measure.KindExplore || math.Abs(s.Mbps()-100) > 2 {
+				t.Fatalf("explored window: %s at %.1f Mbps, want explore at 100", s.Kind, s.Mbps())
+			}
+			explored++
+		}
+	}
+	if explored == 0 {
+		t.Fatal("no samples from the explored stretch")
+	}
+	m.home()
+	if _, recent := m.take(); len(recent) != 2 || math.Abs(recent[0]-40) > 1 {
+		t.Fatalf("media node's recent after exploring: %v, want its two ≈ 40 Mbps windows", recent)
+	}
+
+	// A fast node fills the read-ahead within its ramp: the whole stretch is
+	// its sample, ramp and all.
+	m.explored()
+	m.read(8<<20, 500*time.Millisecond)
+	s, ok := m.home()
+	if !ok || s.Kind != measure.KindExplore || math.Abs(s.Mbps()-134.2) > 1 {
+		t.Fatalf("home = %+v (%.1f Mbps), %v; want the whole stretch at 134 Mbps", s, s.Mbps(), ok)
+	}
+	if _, ok := m.home(); ok {
+		t.Error("home without a stretch gave a sample")
 	}
 }

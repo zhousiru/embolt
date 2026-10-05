@@ -168,3 +168,26 @@ func TestUnknownBitrateUsesTheRecentPeak(t *testing.T) {
 		t.Errorf("bitrate %v, want the recent peak 80", s.Bitrate())
 	}
 }
+
+// TestExploreOnlyWithAFullReadAhead: a session tests another node from its
+// read-ahead only once the read-ahead has filled, and not again within the gap.
+func TestExploreOnlyWithAFullReadAhead(t *testing.T) {
+	c, n := testController(t, map[string][]float64{"a": {25, 24, 26}})
+	s, _ := c.Play("tv/1", 22.2)
+	other := n["a"]
+	if s.Node() == other {
+		other = n["b"]
+	}
+	if got := s.Explore(Observation{Recent: []float64{25}}); got != nil {
+		t.Fatalf("explored %v with room in the read-ahead", got)
+	}
+	if got := s.Explore(Observation{Full: true}); got != other {
+		t.Fatalf("Explore = %v, want %v", got, other)
+	}
+	if got := s.Explore(Observation{Full: true}); got != nil {
+		t.Errorf("explored %v again within %v", got, exploreGap)
+	}
+	if !c.exploring() {
+		t.Error("speed rounds would run beside the exploring session")
+	}
+}

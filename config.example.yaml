@@ -38,6 +38,7 @@ proxy-providers:
 # probes:
 #   speed_tests_per_hour: 12
 #   max_new_ips_per_hour: 8 # distinct nodes speed-tested on your token per hour
+#   explore: true # with a full read-ahead, read the next stretch through another node
 
 # listen: ":8096"
 # tls: {listen: ":8920", cert: /config/cert.pem, key: /config/key.pem}

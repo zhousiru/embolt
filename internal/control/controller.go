@@ -61,6 +61,7 @@ type Controller struct {
 	plays      map[string]*Playback
 	target     *measure.Target
 	refused    time.Time            // speed tests paused until
+	explored   time.Time            // a session last read through another node
 	tested     map[string]time.Time // node ID → last speed test, for the exit-IP cap
 	peak       float64              // highest bitrate played within peakMemory
 	peakAt     time.Time
@@ -121,7 +122,7 @@ func (c *Controller) Run(ctx context.Context) {
 		case <-c.kick:
 			c.speedRound(ctx)
 		case <-speed.C:
-			if c.active() {
+			if c.active() && !c.exploring() {
 				c.speedRound(ctx)
 			}
 			speed.Reset(c.speedInterval())
@@ -146,6 +147,24 @@ func (c *Controller) pingInterval() time.Duration {
 func (c *Controller) speedInterval() time.Duration {
 	perHour := max(c.cfg.Load().Probes.SpeedTestsPerHour, 1)
 	return 3 * time.Hour / time.Duration(perHour)
+}
+
+// exploring reports whether a session tested a node from its read-ahead
+// within the last speed-test interval: playback is doing the probing, and a
+// separate test would only compete with it for the downlink.
+func (c *Controller) exploring() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return time.Since(c.explored) < c.speedInterval()
+}
+
+// Refused pauses speed tests and exploration for 1 h: the server answered
+// one with 403 or 429.
+func (c *Controller) Refused() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.refused = time.Now().Add(time.Hour)
+	slog.Warn("server refused a speed test; pausing speed tests for 1 h")
 }
 
 // Primary is the node for control traffic: the quickest to deliver a burst
@@ -241,20 +260,15 @@ func (c *Controller) speedRound(ctx context.Context) {
 	bitrate = cmp.Or(bitrate, c.typicalMbps())
 	c.mu.Unlock()
 
-	worth := c.probeValues(c.usable(nil), busy, bitrate, now)
-	ranked := slices.Collect(maps.Keys(worth))
-	slices.SortFunc(ranked, func(a, b *nodes.Node) int { return cmp.Compare(worth[b], worth[a]) })
+	ranked := c.ranked(busy, bitrate, now)
 
 	c.mu.Lock()
-	picks := c.withinIPCap(ranked, now)
+	picks := c.withinIPCap(ranked, now, 3)
 	c.mu.Unlock()
 	for _, n := range picks {
 		s, err := measure.SpeedTest(ctx, n, target)
 		if errors.Is(err, measure.ErrRefused) {
-			c.mu.Lock()
-			c.refused = time.Now().Add(time.Hour)
-			c.mu.Unlock()
-			slog.Warn("server refused a speed test; pausing speed tests for 1 h")
+			c.Refused()
 			return
 		}
 		if err != nil {
@@ -267,6 +281,14 @@ func (c *Controller) speedRound(ctx context.Context) {
 
 // minProbeValue is the least expected gain, in seconds of stall, worth a test.
 const minProbeValue = 0.01
+
+// ranked orders the nodes worth a test, most valuable first.
+func (c *Controller) ranked(busy map[*nodes.Node]bool, bitrate float64, now time.Time) []*nodes.Node {
+	worth := c.probeValues(c.usable(nil), busy, bitrate, now)
+	ranked := slices.Collect(maps.Keys(worth))
+	slices.SortFunc(ranked, func(a, b *nodes.Node) int { return cmp.Compare(worth[b], worth[a]) })
+	return ranked
+}
 
 // probeValues scores a speed test of each usable node that no stream is
 // measuring already, keeping those worth at least minProbeValue. Choices are
@@ -313,9 +335,9 @@ func probeValue(cfg config.Control, b measure.Belief, best, bitrate float64, now
 	return gain / outcomes
 }
 
-// withinIPCap takes up to 3 nodes, keeping the distinct exit IPs the server
-// sees on the player's token within max_new_ips_per_hour.
-func (c *Controller) withinIPCap(ranked []*nodes.Node, now time.Time) []*nodes.Node {
+// withinIPCap takes up to k nodes, keeping the distinct exit IPs the server
+// sees on the player's token within max_new_ips_per_hour. Caller holds c.mu.
+func (c *Controller) withinIPCap(ranked []*nodes.Node, now time.Time, k int) []*nodes.Node {
 	recent := 0
 	for id, t := range c.tested {
 		if now.Sub(t) > time.Hour {
@@ -327,7 +349,7 @@ func (c *Controller) withinIPCap(ranked []*nodes.Node, now time.Time) []*nodes.N
 	limit := c.cfg.Load().Probes.MaxNewIPsPerHour
 	var picks []*nodes.Node
 	for _, n := range ranked {
-		if len(picks) == 3 {
+		if len(picks) == k {
 			break
 		}
 		if _, seen := c.tested[n.ID]; !seen {
