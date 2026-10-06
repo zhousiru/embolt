@@ -135,7 +135,7 @@ data_dir: `+t.TempDir()+"\n"+strings.Join(extra, "\n"))
 	case <-time.After(5 * time.Second):
 		t.Fatal("nodes never loaded")
 	}
-	stats := measure.NewStats(store)
+	stats := measure.NewStats()
 	ctrl := control.New(store, pool, stats)
 	p, _ := profile.Open("")
 	s := New(store, ctrl, stats, cache.Open(t.TempDir(), 1<<20), p)

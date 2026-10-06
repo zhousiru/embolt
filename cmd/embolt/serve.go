@@ -53,7 +53,7 @@ func serve(args []string) error {
 	}
 
 	pool := nodes.NewPool(store)
-	stats := measure.NewStats(store)
+	stats := measure.NewStats()
 	ctrl := control.New(store, pool, stats)
 	prof, err := profile.Open(filepath.Join(cfg.DataDir, "profile.json"))
 	if err != nil {

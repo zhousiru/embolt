@@ -31,7 +31,6 @@ proxy-providers:
 
 # control:
 #   read_ahead: 60s         # media buffered ahead of the player
-#   half_life: 2h           # how fast old measurements fade
 
 # profile: upstream         # "local": progress, played, favorites, likes and
 #                           # preferences stay in data_dir/profile.json, so people

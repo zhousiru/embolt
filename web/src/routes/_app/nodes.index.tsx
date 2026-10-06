@@ -11,7 +11,7 @@ function Nodes() {
   const nodes = data ?? []
   const q = filter.toLowerCase()
   const shown = nodes.filter((n) => [n.name, n.protocol, n.provider].some((f) => f.toLowerCase().includes(q)))
-  const scale = Math.max(1, ...nodes.filter((n) => n.rateMbps.measured).map((n) => n.rateMbps.high))
+  const scale = Math.max(1, ...nodes.filter((n) => n.rateMbps.measured).map((n) => n.rateMbps.mean))
 
   return (
     <Panel

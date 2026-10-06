@@ -83,33 +83,28 @@ export function State({ state }: { state: string }) {
   )
 }
 
-/** An estimate as its typical value, with its 90% range and evidence underneath. */
+/** An estimate as its moving average. */
 export function Range({ e, unit, digits = 0 }: { e: Estimate; unit: string; digits?: number }) {
   if (!e.measured) return <span className="text-zinc-400 dark:text-zinc-600">—</span>
   return (
     <span className="tabular-nums">
       {e.mean.toFixed(digits)}
       <span className="ml-1 text-xs text-zinc-500">{unit}</span>
-      <span className="block text-xs text-zinc-400 dark:text-zinc-500" title={`90% range · n ${e.evidence.toFixed(1)}`}>
-        {e.low.toFixed(digits)}–{e.high.toFixed(digits)}
-      </span>
     </span>
   )
 }
 
-/** A rate's typical value, with its 90% range drawn on a scale shared by its column. */
+/** A rate's moving average, drawn on a scale shared by its column. */
 export function RateBar({ e, scale }: { e: Estimate; scale: number }) {
   if (!e.measured) return <span className="text-zinc-400 dark:text-zinc-600">—</span>
-  const pct = (x: number) => `${Math.min(x / scale, 1) * 100}%`
   return (
-    <div className="flex items-center gap-3" title={`90% of samples ${e.low.toFixed(0)}–${e.high.toFixed(0)} Mbps`}>
+    <div className="flex items-center gap-3">
       <span className="w-20 shrink-0 tabular-nums">
         {e.mean.toFixed(0)}
         <span className="ml-1 text-xs text-zinc-500">Mbps</span>
       </span>
       <div className="relative h-1.5 w-full min-w-24 rounded-full bg-zinc-100 dark:bg-zinc-800">
-        <div className="absolute inset-y-0 rounded-full bg-sky-500/30" style={{ left: pct(e.low), width: `calc(${pct(e.high)} - ${pct(e.low)})` }} />
-        <div className="absolute -inset-y-0.5 w-0.5 rounded-full bg-sky-500" style={{ left: pct(e.mean) }} />
+        <div className="absolute inset-y-0 left-0 rounded-full bg-sky-500" style={{ width: `${Math.min(e.mean / scale, 1) * 100}%` }} />
       </div>
     </div>
   )

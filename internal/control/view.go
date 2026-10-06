@@ -89,7 +89,7 @@ func (c *Controller) sessionView(p *Playback) view.Session {
 		Started:       p.started,
 	}
 	if r := c.stats.State(p.node).Rate; r.Measured() {
-		v.NodeMbps = r.Typical()
+		v.NodeMbps = r.Value
 	}
 	return v
 }
@@ -208,11 +208,8 @@ func (c *Controller) nodeView(n *nodes.Node, roles []string) view.Node {
 	return v
 }
 
-// estimate shows a log-scale estimate on the linear scale: its typical
-// value and the 90% range of one sample.
 func estimate(e measure.Estimate) view.Estimate {
-	lo, hi := e.Range()
-	return view.Estimate{Measured: e.Measured(), Mean: e.Typical(), Low: lo, High: hi, Evidence: e.Weight}
+	return view.Estimate{Measured: e.Measured(), Mean: e.Value}
 }
 
 // errClass reduces an error to its kind: raw messages can name the node's

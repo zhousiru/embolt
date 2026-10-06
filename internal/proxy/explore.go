@@ -60,7 +60,7 @@ func (t test) run(ctx context.Context, play *control.Stream, n *nodes.Node) {
 	}
 	st := t.s.stats.State(n)
 	slog.Info("explored", "session", play.Key(), "node", n.Name, "mb", got>>20, "mbps", mbps,
-		"node_mbps", math.Round(st.Rate.Typical()*10)/10, "node_samples", math.Round(st.Rate.Weight*10)/10, "err", errMsg)
+		"node_mbps", math.Round(st.Rate.Value*10)/10, "err", errMsg)
 }
 
 // read fetches the stretch until it is done, its time is up, or the node

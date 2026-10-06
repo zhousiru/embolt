@@ -44,7 +44,7 @@ export interface Session {
   bitrateMbps: number /* float64 */;
   bufferSeconds: number /* float64 */; // read-ahead plus a lower bound on the player's own
   fetchedMbps: number /* float64 */; // read from upstream over the last step
-  nodeMbps: number /* float64 */; // the media node's typical rate, 0 if not measured
+  nodeMbps: number /* float64 */; // the media node's average rate, 0 if not measured
   failovers: number /* int */;
   tests: number /* int */;
   lowSeconds: number /* float64 */; // under the low mark, once first over it
@@ -84,16 +84,11 @@ export interface Point {
   mbps: number /* float64 */; // fetched
 }
 /**
- * Estimate summarizes a node's measurements: their typical value and the
- * 90% range of one sample, and how many samples' worth of evidence remain
- * after fade-out.
+ * Estimate is a moving average of a node's measurements.
  */
 export interface Estimate {
   measured: boolean;
   mean: number /* float64 */;
-  low: number /* float64 */;
-  high: number /* float64 */;
-  evidence: number /* float64 */;
 }
 export interface Node {
   id: string;

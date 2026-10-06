@@ -436,6 +436,9 @@ func (f *file) close() {
 	}
 }
 
+// maxAhead is the most read-ahead a file reports.
+const maxAhead = 2 * time.Minute
+
 // observe is what the controller's step judges, and the file's main read;
 // nil while no region still fetching is being played.
 //
@@ -443,15 +446,15 @@ func (f *file) close() {
 // at its share of the bitrate, the share it delivered lately: a file's audio,
 // stored apart from its video, plays a small share of its bytes, and its few
 // megabytes last minutes. It is the shortest of the regions still fetching,
-// since the player stalls when any runs dry, and at most what the horizon
-// can tell apart. Delivery is the main read's alone, so that a seek starts
+// since the player stalls when any runs dry, and at most maxAhead, which
+// is plenty: a file fully fetched reports that. Delivery is the main read's alone, so that a seek starts
 // the bound on the player's buffer afresh.
 func (f *file) observe(now time.Time) (control.Observation, *span) {
 	main, total := f.lead(now)
 	if main == nil {
 		return control.Observation{}, nil
 	}
-	secs := (control.Horizon + control.BufferMin).Seconds()
+	secs := maxAhead.Seconds()
 	for _, sp := range f.spans {
 		if !sp.playing(now) || sp.fetched() {
 			continue

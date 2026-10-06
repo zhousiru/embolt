@@ -40,7 +40,7 @@ type Session struct {
 	BitrateMbps   float64   `json:"bitrateMbps"`
 	BufferSeconds float64   `json:"bufferSeconds"` // read-ahead plus a lower bound on the player's own
 	FetchedMbps   float64   `json:"fetchedMbps"`   // read from upstream over the last step
-	NodeMbps      float64   `json:"nodeMbps"`      // the media node's typical rate, 0 if not measured
+	NodeMbps      float64   `json:"nodeMbps"`      // the media node's average rate, 0 if not measured
 	Failovers     int       `json:"failovers"`
 	Tests         int       `json:"tests"`
 	LowSeconds    float64   `json:"lowSeconds"` // under the low mark, once first over it
@@ -77,15 +77,10 @@ type Point struct {
 	Mbps   float64   `json:"mbps"`   // fetched
 }
 
-// Estimate summarizes a node's measurements: their typical value and the
-// 90% range of one sample, and how many samples' worth of evidence remain
-// after fade-out.
+// Estimate is a moving average of a node's measurements.
 type Estimate struct {
 	Measured bool    `json:"measured"`
 	Mean     float64 `json:"mean"`
-	Low      float64 `json:"low"`
-	High     float64 `json:"high"`
-	Evidence float64 `json:"evidence"`
 }
 
 type Node struct {

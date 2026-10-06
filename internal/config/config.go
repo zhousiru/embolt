@@ -95,7 +95,6 @@ func (d DNS) equal(o DNS) bool {
 
 // Control tunes the controller.
 type Control struct {
-	HalfLife  time.Duration `yaml:"half_life"`  // how fast a node's measurements fade
 	ReadAhead time.Duration `yaml:"read_ahead"` // media buffered ahead of the player
 }
 
@@ -130,15 +129,12 @@ func Default() *Config {
 	return &Config{
 		Listen:   ":8096",
 		Upstream: Upstream{Redirect: "follow"},
-		Control: Control{
-			HalfLife:  2 * time.Hour,
-			ReadAhead: 60 * time.Second,
-		},
-		Probes:  Probes{Budget: 0.05},
-		Cache:   Cache{SizeMB: 2048},
-		Web:     Web{Listen: ":9090"},
-		DataDir: "/data",
-		Profile: "upstream",
+		Control:  Control{ReadAhead: 60 * time.Second},
+		Probes:   Probes{Budget: 0.05},
+		Cache:    Cache{SizeMB: 2048},
+		Web:      Web{Listen: ":9090"},
+		DataDir:  "/data",
+		Profile:  "upstream",
 	}
 }
 
@@ -184,8 +180,7 @@ func (c *Config) validate() error {
 		check(err == nil, "proxy-providers.%s.exclude-filter: %v", name, err)
 		c.Providers[name] = p
 	}
-	k := c.Control
-	check(k.HalfLife > 0 && k.ReadAhead > 0, "control: durations must be positive")
+	check(c.Control.ReadAhead > 0, "control.read_ahead: want a positive duration")
 	check(c.Probes.Budget >= 0 && c.Probes.Budget < 1, "probes.budget: want [0, 1)")
 	check((c.TLS.Listen == "") == (c.TLS.Cert == "") && (c.TLS.Cert == "") == (c.TLS.Key == ""),
 		"tls: set listen, cert and key together")

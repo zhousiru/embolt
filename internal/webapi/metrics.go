@@ -7,8 +7,8 @@ import (
 )
 
 var (
-	nodeRTT     = prometheus.NewDesc("embolt_node_rtt_ms", "Typical RTT to the Emby server.", []string{"node"}, nil)
-	nodeRate    = prometheus.NewDesc("embolt_node_rate_mbps", "Typical rate from the Emby server.", []string{"node"}, nil)
+	nodeRTT     = prometheus.NewDesc("embolt_node_rtt_ms", "Moving average of RTT to the Emby server.", []string{"node"}, nil)
+	nodeRate    = prometheus.NewDesc("embolt_node_rate_mbps", "Moving average of the rate from the Emby server.", []string{"node"}, nil)
 	nodeOpen    = prometheus.NewDesc("embolt_node_breaker_open", "1 while the node's breaker is open.", []string{"node"}, nil)
 	sessFetched = prometheus.NewDesc("embolt_session_fetched_mbps", "Rate the session read from upstream over its last step.", []string{"session"}, nil)
 	sessBuffer  = prometheus.NewDesc("embolt_session_buffer_seconds", "Seconds of media buffered ahead of the session's player.", []string{"session"}, nil)

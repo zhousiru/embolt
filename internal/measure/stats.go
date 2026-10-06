@@ -4,13 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"math"
 	"os"
 	"slices"
 	"sync"
 	"time"
 
-	"github.com/zhousiru/embolt/internal/config"
 	"github.com/zhousiru/embolt/internal/nodes"
 )
 
@@ -21,9 +19,8 @@ const (
 	minRateDur  = 200 * time.Millisecond
 	minRateMbps = 0.1 // a stalled window still counts, as very slow
 
-	recentHalfLife = 30 * time.Second // of a node's rate now, see State
-	keepVanished   = 7 * 24 * time.Hour
-	recentLen      = 20
+	keepVanished = 7 * 24 * time.Hour
+	recentLen    = 20
 )
 
 type Kind string
@@ -54,15 +51,10 @@ func (s Sample) Mbps() float64 {
 	return max(float64(s.Bytes)*8/s.Dur.Seconds()/1e6, minRateMbps)
 }
 
-// State is a copy of what is known about one node, in log-ms and log-Mbps.
-// Rate is its typical rate, which fades over half_life; Now is its rate over
-// the next minutes: the typical rate worth one sample, pooled with its
-// samples of the last minute or so. A node seen sagging half a minute ago is
-// judged by the sag; one that sagged minutes ago by its typical rate again.
-// Now rests on Rate's evidence, so it is doubted as much.
+// State is a copy of what is known about one node: moving averages of its
+// RTT in ms and its rate in Mbps, and its breaker.
 type State struct {
 	RTT, Rate Estimate
-	Now       Estimate
 	OpenUntil time.Time
 }
 
@@ -70,24 +62,21 @@ func (s State) Open(now time.Time) bool { return now.Before(s.OpenUntil) }
 
 // Stats holds every node's estimates and breaker.
 type Stats struct {
-	cfg *config.Store
-
 	mu    sync.Mutex
 	nodes map[string]*entry
 }
 
 type entry struct {
-	RTT     Estimate  `json:"rtt"`
-	Rate    Estimate  `json:"rate"`
+	RTT     Estimate  `json:"rtt_ms"`
+	Rate    Estimate  `json:"mbps"`
 	Seen    time.Time `json:"seen"`
-	recent  Estimate  // rate, over recentHalfLife
 	breaker breaker
 	samples []Sample
 }
 
 // NewStats keeps estimates for every node.
-func NewStats(cfg *config.Store) *Stats {
-	return &Stats{cfg: cfg, nodes: map[string]*entry{}}
+func NewStats() *Stats {
+	return &Stats{nodes: map[string]*entry{}}
 }
 
 // Record folds a sample into the node's estimates and breaker.
@@ -99,7 +88,6 @@ func (s *Stats) Record(n *nodes.Node, smp Sample) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e := s.entry(n)
-	hl := s.cfg.Load().Control.HalfLife
 	e.Seen = smp.Time
 	e.samples = append(e.samples, smp)
 	if len(e.samples) > recentLen {
@@ -112,11 +100,10 @@ func (s *Stats) Record(n *nodes.Node, smp Sample) {
 		return
 	}
 	if smp.Kind == KindPing && smp.TTFB > 0 {
-		e.RTT.Observe(math.Log(float64(smp.TTFB)/float64(time.Millisecond)), smp.Time, hl)
+		e.RTT.Observe(float64(smp.TTFB)/float64(time.Millisecond), smp.Time)
 	}
 	if r := smp.Mbps(); r > 0 {
-		e.Rate.Observe(math.Log(r), smp.Time, hl)
-		e.recent.Observe(math.Log(r), smp.Time, recentHalfLife)
+		e.Rate.Observe(r, smp.Time)
 	}
 }
 
@@ -128,26 +115,12 @@ func (s *Stats) Healthy(n *nodes.Node) {
 	s.entry(n).breaker.record(true, time.Now())
 }
 
-// State returns the node's estimates as of now.
-func (s *Stats) State(n *nodes.Node) State { return s.StateAt(n, time.Now()) }
-
-// StateAt returns the node's estimates as of a given time.
-func (s *Stats) StateAt(n *nodes.Node, now time.Time) State {
-	hl := s.cfg.Load().Control.HalfLife
+// State returns the node's estimates.
+func (s *Stats) State(n *nodes.Node) State {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e := s.entry(n)
-	rate := e.Rate.AsOf(now, hl)
-	typical := rate
-	typical.Weight = min(typical.Weight, 1)
-	live := typical.with(e.recent.AsOf(now, recentHalfLife))
-	live.Weight = rate.Weight
-	return State{
-		RTT:       e.RTT.AsOf(now, hl),
-		Rate:      rate,
-		Now:       live,
-		OpenUntil: e.breaker.until,
-	}
+	return State{RTT: e.RTT, Rate: e.Rate, OpenUntil: e.breaker.until}
 }
 
 // Open reports whether n's breaker is open.
