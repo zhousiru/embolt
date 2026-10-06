@@ -92,7 +92,7 @@ type span struct {
 	marks    []mark // where readers left, within keepIdle
 	reach    int64  // furthest byte handed to a player
 	opened   time.Time
-	sent     int64       // bytes handed to players
+	start    int64       // the first byte a player asked of the span
 	recent   float64     // bytes handed to players, decaying over mainDecay
 	recentAt time.Time   // when bytes were last handed, or the span opened
 	idle     *time.Timer // drops the span once it has had no reader for keepIdle
@@ -170,7 +170,7 @@ func (f *file) open(rd *reader) *span {
 		}
 	}
 	now := time.Now()
-	sp := &span{f: f, total: -1, from: rd.pos, to: rd.pos, end: -1, reach: rd.pos,
+	sp := &span{f: f, total: -1, start: rd.pos, from: rd.pos, to: rd.pos, end: -1, reach: rd.pos,
 		readers: map[*reader]struct{}{}, opened: now, recentAt: now, wake: make(chan struct{})}
 	f.spans = append(f.spans, sp)
 	sp.attach(rd)
@@ -320,7 +320,6 @@ func (sp *span) at(pos, last int64) []byte {
 func (sp *span) advance(rd *reader, n int64) {
 	rd.pos += n
 	sp.reach = max(sp.reach, rd.pos)
-	sp.sent += n
 	now := time.Now()
 	sp.recent = sp.decayed(now) + float64(n)
 	sp.recentAt = now
@@ -469,7 +468,7 @@ func (f *file) observe(now time.Time) (control.Observation, *span) {
 	}
 	return control.Observation{
 		ReadAhead: time.Duration(secs * float64(time.Second)),
-		Delivered: f.media(main.sent),
+		Delivered: f.media(main.reach - main.start),
 		Elapsed:   now.Sub(main.opened),
 	}, main
 }

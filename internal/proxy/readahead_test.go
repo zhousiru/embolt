@@ -248,7 +248,7 @@ func TestParseRange(t *testing.T) {
 // testSpan is a span that answered, holding [from, to) with reach handed to
 // players, which delivered recent bytes lately, as of at.
 func testSpan(f *file, from, to, reach int64, recent float64, at time.Time, connected bool) *span {
-	sp := &span{f: f, ready: true, from: from, to: to, end: -1, reach: reach,
+	sp := &span{f: f, ready: true, start: from, from: from, to: to, end: -1, reach: reach,
 		recent: recent, recentAt: at, opened: at, readers: map[*reader]struct{}{}, wake: make(chan struct{})}
 	if connected {
 		sp.readers[&reader{pos: reach}] = struct{}{}
@@ -302,7 +302,7 @@ func TestReadAheadIsTheShortestRegion(t *testing.T) {
 	// bound on the player's buffer starts afresh from it.
 	seek := &file{bitrate: 8}
 	old := testSpan(seek, 0, 300*mb, 290*mb, 1e9, now.Add(-time.Hour), false)
-	old.recentAt, old.sent = now.Add(-2*revisit), 290*mb
+	old.recentAt = now.Add(-2 * revisit)
 	jumped := testSpan(seek, 500*mb, 502*mb, 500*mb, 1, now, true)
 	obs, main := seek.observe(now)
 	if main != jumped || secs(obs.ReadAhead) != at(2*mb, 1) {
@@ -310,5 +310,22 @@ func TestReadAheadIsTheShortestRegion(t *testing.T) {
 	}
 	if obs.Delivered != 0 || obs.Elapsed != 0 {
 		t.Errorf("after a seek: delivered %v over %v, want none: the player's buffer went with the seek", obs.Delivered, obs.Elapsed)
+	}
+}
+
+// TestRereadsAreNotDelivery: a player that reads the same bytes through
+// several connections has not got further into the file, so its buffer
+// does not grow.
+func TestRereadsAreNotDelivery(t *testing.T) {
+	const mb = 1 << 20
+	now := time.Now()
+	f := &file{bitrate: 8, ra: newReadAhead()}
+	sp := testSpan(f, 0, 20*mb, 0, 1, now, false)
+	first, again := &reader{}, &reader{}
+	sp.readers[first], sp.readers[again] = struct{}{}, struct{}{}
+	sp.advance(first, 10*mb)
+	sp.advance(again, 10*mb)
+	if obs, _ := f.observe(now); obs.Delivered != f.media(10*mb) {
+		t.Errorf("10 MB read twice: delivered %v, want %v", obs.Delivered, f.media(10*mb))
 	}
 }
