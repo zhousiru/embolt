@@ -2,7 +2,6 @@ package control
 
 import (
 	"context"
-	"math"
 	"strings"
 	"testing"
 	"time"
@@ -12,57 +11,25 @@ import (
 	"github.com/zhousiru/embolt/internal/nodes"
 )
 
-func TestExpectedStall(t *testing.T) {
-	known := func(mbps float64) measure.Belief { return measure.NewBelief(math.Log(mbps), 0.01, 1e4) }
-	// Need at B = 0 for 20 Mbps video is 21.67 Mbps over 120 s.
-	if s := expectedStall(known(200), 0, 20); s > 1e-6 {
-		t.Errorf("fast node: %.3f s of stall, want 0", s)
-	}
-	want := 120.0 / 20 * (20*(1+10.0/120) - 10) // (H/V)·(R_req − r) at r = 10 Mbps
-	if s := expectedStall(known(10), 0, 20); math.Abs(s-want) > 0.05 {
-		t.Errorf("10 Mbps node: %.2f s of stall, want %.2f", s, want)
-	}
-	if s := expectedStall(measure.Belief{}, 0, 20); math.Abs(s-120.0/20*20*(1+10.0/120)) > 1e-9 {
-		t.Errorf("dead node: %.2f s of stall", s)
-	}
-}
-
 // TestBest: every choice meets the target first, by the caller's preference,
-// and falls back on the least expected stall when nothing does.
+// and falls back on the one least short when nothing does.
 func TestBest(t *testing.T) {
-	c, n := testController(t, nil)
-	a, b := n["a"], n["b"]
+	a, b := &nodes.Node{Name: "a"}, &nodes.Node{Name: "b"}
 	byName := func(x, y option) int { return strings.Compare(x.n.Name, y.n.Name) }
-	if o, ok := c.best([]option{{n: b, risk: 0.001, stall: 0.1}, {n: a, risk: 0.005, stall: 0.5}}, byName); o.n != a || !ok {
+	if o, ok := best([]option{{n: b, known: true, safe: 30, need: 20}, {n: a, known: true, safe: 25, need: 20}}, byName); o.n != a || !ok {
 		t.Errorf("both pass: picked %v (meets %v), want a by preference", o.n, ok)
 	}
-	if o, ok := c.best([]option{{n: a, risk: 0.5, stall: 0.1}, {n: b, risk: 0.005, stall: 9}}, byName); o.n != b || !ok {
+	if o, ok := best([]option{{n: a, known: true, safe: 10, need: 20}, {n: b, known: true, safe: 21, need: 20}}, byName); o.n != b || !ok {
 		t.Errorf("only b passes: picked %v (meets %v), want b", o.n, ok)
 	}
-	if o, ok := c.best([]option{{n: a, risk: 0.5, stall: 8}, {n: b, risk: 0.9, stall: 3}}, byName); o.n != b || ok {
-		t.Errorf("none passes: picked %v (meets %v), want b, the least stall", o.n, ok)
+	if o, ok := best([]option{{n: a, known: true, safe: 10, need: 20}, {n: b, known: true, safe: 15, need: 21}}, byName); o.n != b || ok {
+		t.Errorf("none passes: picked %v (meets %v), want b, the least short", o.n, ok)
 	}
-	if o, _ := c.best(nil, byName); o.n != nil {
+	if o, ok := best([]option{{n: a, safe: 90, need: 20}}, byName); ok {
+		t.Errorf("a node not known: picked %v as meeting the target", o.n)
+	}
+	if o, _ := best(nil, byName); o.n != nil {
 		t.Errorf("no options: picked %v", o.n)
-	}
-}
-
-// TestByDraw: Thompson sampling tests the barely measured node that may be
-// fast, and the known fast one, but hardly ever the one known to be slow.
-func TestByDraw(t *testing.T) {
-	slow, fast, vague := &nodes.Node{Name: "slow"}, &nodes.Node{Name: "fast"}, &nodes.Node{Name: "vague"}
-	beliefs := map[*nodes.Node]measure.Belief{
-		slow:  measure.NewBelief(math.Log(3), 0.2, 40),
-		fast:  measure.NewBelief(math.Log(100), 0.2, 40),
-		vague: measure.NewBelief(math.Log(60), 1, 1),
-	}
-	const trials = 2000
-	first := map[*nodes.Node]int{}
-	for range trials {
-		first[byDraw(beliefs)[0]]++
-	}
-	if first[slow] > trials/100 || first[vague] < trials/20 || first[fast] < trials/4 {
-		t.Errorf("first picks of %d: slow %d, vague %d, fast %d", trials, first[slow], first[vague], first[fast])
 	}
 }
 
@@ -85,7 +52,7 @@ data_dir: ` + t.TempDir()))
 	pool := nodes.NewPool(store)
 	go pool.Run(ctx)
 	<-pool.Updated()
-	stats := measure.NewStats(store, "")
+	stats := measure.NewStats(store)
 	byName := map[string]*nodes.Node{}
 	for _, n := range pool.All() {
 		byName[n.Name] = n
@@ -127,8 +94,8 @@ func TestStepLeavesASaggingNodeAtOnce(t *testing.T) {
 	}
 	record(c.stats, n["a"], 0, 2.5, 5.8)
 	obs := Observation{Delivered: 2 * time.Second, Elapsed: 6 * time.Second}
-	if got := s.Step(obs); got != n["b"] {
-		t.Errorf("Step = %v, want a switch to b", got)
+	if got, why := s.Step(obs); got != n["b"] || why != "risk" {
+		t.Errorf("Step = %v (%s), want a switch to b for risk", got, why)
 	}
 }
 
@@ -142,10 +109,10 @@ func TestStepStaysWhenThePlayerHasBuffer(t *testing.T) {
 	// no reason to spend an exit IP.
 	record(c.stats, n["a"], 0, 26, 24, 27)
 	obs := Observation{Delivered: 70 * time.Second, Elapsed: 30 * time.Second}
-	if got := s.Step(obs); got != nil {
-		t.Errorf("Step = %v, want stay (risk %.4f)", got, s.risk)
+	if got, _ := s.Step(obs); got != nil {
+		t.Errorf("Step = %v, want stay (safe %.1f, need %.1f)", got, s.safe, s.need)
 	}
-	if got := s.Step(Observation{Full: true}); got != nil {
+	if got, _ := s.Step(Observation{Full: true}); got != nil {
 		t.Errorf("Step with a full read-ahead = %v, want stay", got)
 	}
 }
@@ -160,11 +127,11 @@ func TestOnlyTheLeadStreamDecides(t *testing.T) {
 	play.Step(Observation{Delivered: 30 * time.Second, Elapsed: 20 * time.Second, Full: true})
 	// The scan reads a little, then nothing: alone it would look like a stall.
 	record(c.stats, n["a"], 0, 1, 1)
-	if got := scan.Step(Observation{Delivered: time.Second, Elapsed: 6 * time.Second}); got != nil {
+	if got, _ := scan.Step(Observation{Delivered: time.Second, Elapsed: 6 * time.Second}); got != nil {
 		t.Errorf("a side connection switched the session to %v", got)
 	}
 	// The same starvation on the lead stream does move the session.
-	if got := play.Step(Observation{Delivered: 30 * time.Second, Elapsed: 40 * time.Second}); got != n["b"] {
+	if got, _ := play.Step(Observation{Delivered: 30 * time.Second, Elapsed: 40 * time.Second}); got != n["b"] {
 		t.Errorf("lead stream starving: Step = %v, want a switch to b", got)
 	}
 }
@@ -189,7 +156,7 @@ func TestPrimaryWeighsSpeed(t *testing.T) {
 				}
 			}
 			if got, _ := c.Primary(); got != n[tc.want] {
-				t.Errorf("primary %v, want %s (a %.0f ms, b %.0f ms)", got, tc.want, c.burst(n["a"]).mean, c.burst(n["b"]).mean)
+				t.Errorf("primary %v, want %s (a %.0f ms, b %.0f ms)", got, tc.want, c.burst(n["a"]), c.burst(n["b"]))
 			}
 		})
 	}
@@ -220,7 +187,7 @@ func TestPrimaryMovesOnlyWhenSureAndIdle(t *testing.T) {
 	s.Release()
 	c.reconsiderPrimary()
 	if c.primary != n["b"] {
-		t.Errorf("primary %v once idle, want b (a %.0f ms, b %.0f ms)", c.primary, c.burst(n["a"]).mean, c.burst(n["b"]).mean)
+		t.Errorf("primary %v once idle, want b (a %.0f ms, b %.0f ms)", c.primary, c.burst(n["a"]), c.burst(n["b"]))
 	}
 }
 
@@ -253,9 +220,9 @@ func TestSessionShowsTheStepsChoice(t *testing.T) {
 // TestStepDoesNotReturnToANodeItJustLeft replays 14:32 of the 2026-10-05
 // session 5e82c7d6: a 40 Mbps video flapping between two nodes every 22 s.
 // The session left b when it sagged to ~25 Mbps and now reads a, a little
-// under the target. Judged by its typical rate, b looked certain to keep up
+// under the bitrate. Judged by its typical rate, b looked certain to keep up
 // and the session went straight back; judged as a is, by what it did half a
-// minute ago, b is worse than staying.
+// minute ago, b falls short.
 func TestStepDoesNotReturnToANodeItJustLeft(t *testing.T) {
 	c, n := testController(t, map[string][]float64{"a": {40, 44, 37, 42, 39, 41, 36, 45}, "b": cycle(60, 33, 35, 37)})
 	a, b := n["a"], n["b"]
@@ -266,14 +233,17 @@ func TestStepDoesNotReturnToANodeItJustLeft(t *testing.T) {
 		t.Fatalf("media node %v, want a, the faster of late", s.Node())
 	}
 	const buffer = 40 * time.Second
-	if r := stallRisk(c.stats.State(b).Rate, buffer-c.switchGap(b), 40); r > c.cfg.Load().Control.StallRisk {
-		t.Fatalf("b's typical rate: risk %.4f, want it to pass, as it did when it drew the session back", r)
+	if st := c.stats.State(b); st.Now.Typical() >= st.Rate.Typical() {
+		t.Fatalf("b's rate now %.1f Mbps, typical %.1f: want the sag to weigh", st.Now.Typical(), st.Rate.Typical())
 	}
-	if got := s.Step(Observation{ReadAhead: buffer}); got != nil {
+	if got, _ := s.Step(Observation{ReadAhead: buffer}); got != nil {
 		t.Errorf("Step = %v, want stay: b sagged half a minute ago", got)
 	}
-	if s.risk <= c.cfg.Load().Control.StallRisk {
-		t.Errorf("a's risk %.4f is under target: the step never weighed a move", s.risk)
+	c.mu.Lock()
+	moves := c.moves(s.Playback, time.Now())
+	c.mu.Unlock()
+	if len(moves) != 1 || moves[0].meets() {
+		t.Errorf("b judged by its rate now: %+v, want short of the target", moves)
 	}
 }
 
@@ -286,9 +256,32 @@ func TestUnknownBitrateUsesTheRecentPeak(t *testing.T) {
 	}
 }
 
-// TestExploreWithinBudget: a session tests at once a node that out-draws its
-// media node, whatever its buffer; one test runs at a time, and the next
-// waits for the session to earn one again at its bitrate.
+// TestRateNowSeesASag replays the first switch of the 2026-10-05 test: a
+// node known to be fast, whose stream fell from 9 to 1.3 Mbps on a 5.1 Mbps
+// video with a nearly empty buffer. Its recent samples must decide.
+func TestRateNowSeesASag(t *testing.T) {
+	fast := cycle(40, 70, 80, 90)
+	c, n := testController(t, map[string][]float64{"a": fast, "b": fast})
+	judge := func(name string, buffer time.Duration, mbps float64) option {
+		return c.weigh([]*nodes.Node{n[name]}, buffer, mbps, time.Now(), false)[0]
+	}
+	// No samples lately is no news: the node is judged by its typical rate.
+	if o := judge("a", 20*time.Second, 5.3); !o.meets() {
+		t.Errorf("fast node without recent samples: %+v, want it to meet the target", o)
+	}
+	record(c.stats, n["a"], 0, 60, 70, 65)
+	record(c.stats, n["b"], 0, 9.0, 6.3, 4.7, 1.3)
+	if o := judge("a", 5*time.Second, 5.1); !o.meets() {
+		t.Errorf("healthy node: %+v, want it to meet the target", o)
+	}
+	if o := judge("b", 5*time.Second, 5.1); o.meets() {
+		t.Errorf("sagging node: safe %.1f Mbps for a need of %.1f, want short so the controller acts", o.safe, o.need)
+	}
+}
+
+// TestExploreWithinBudget: a session tests a node that may be faster,
+// whatever its buffer; one test runs at a time, and the next waits until
+// the session has played the test's bytes over its budget.
 func TestExploreWithinBudget(t *testing.T) {
 	c, n := testController(t, nil)
 	s, _ := c.Play("tv/1", 40)
@@ -297,7 +290,7 @@ func TestExploreWithinBudget(t *testing.T) {
 		other = n["b"]
 	}
 	record(c.stats, media, 0, cycle(40, 3)...)
-	record(c.stats, other, 0, cycle(40, 100)...)
+	record(c.stats, other, time.Hour, cycle(40, 100)...)
 	s.Step(Observation{}) // the media node falls short
 	if got := s.Explore(); got != other {
 		t.Fatalf("with nothing buffered: Explore = %v, want %v", got, other)
@@ -306,68 +299,84 @@ func TestExploreWithinBudget(t *testing.T) {
 		t.Errorf("explored %v while a test runs", got)
 	}
 	s.Probed(ProbeBytes)
-	// 5% of 40 Mbps for 10 s is 2.5 MB: a 32 MiB test takes 14 steps.
-	for i := 1; i <= 14; i++ {
-		s.earned = s.earned.Add(-time.Minute) // earns for earnGap, not the minute
-		got := s.Explore()
-		if i < 14 && got != nil {
-			t.Fatalf("explored after earning %d times", i)
-		}
-		if i == 14 && got != other {
-			t.Fatalf("Explore = %v once the session earned a test, want %v", got, other)
-		}
+	// 5% of 40 Mbps is 250 kB/s: a 32 MiB test buys 134 s of quiet.
+	if wait := time.Until(s.nextTest); wait < 133*time.Second || wait > 135*time.Second {
+		t.Errorf("next test in %v, want 134 s", wait)
+	}
+	if got := s.Explore(); got != nil {
+		t.Fatalf("explored %v right after a test", got)
+	}
+	s.nextTest = time.Now()
+	if got := s.Explore(); got != other {
+		t.Fatalf("Explore = %v once the session earned a test, want %v", got, other)
 	}
 }
 
-// TestNoTestWhileFine: a session that keeps up, with a fallback known to
-// keep up, tests nothing; once the fallback's belief has faded, it does.
-func TestNoTestWhileFine(t *testing.T) {
-	c, n := testController(t, nil)
-	s, _ := c.Play("tv/1", 40)
-	media, other := s.Node(), n["a"]
-	if media == other {
-		other = n["b"]
+// TestExploreWhatMayBeFaster: a node not known is tested, and a node known
+// to be faster once it has not been sampled for retestAfter; a node known
+// to be slower, or faster and sampled lately, is not.
+func TestExploreWhatMayBeFaster(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		age   time.Duration
+		mbps  []float64
+		tests bool
+	}{
+		{"not known", time.Hour, []float64{60}, true},
+		{"faster, sampled long ago", time.Hour, cycle(40, 100), true},
+		{"faster, sampled lately", 10 * time.Minute, cycle(40, 100), false},
+		{"slower", time.Hour, cycle(40, 3), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, n := testController(t, nil)
+			s, _ := c.Play("tv/1", 10)
+			media, other := s.Node(), n["a"]
+			if media == other {
+				other = n["b"]
+			}
+			record(c.stats, media, 0, cycle(40, 30)...)
+			record(c.stats, other, tc.age, tc.mbps...)
+			s.Step(Observation{ReadAhead: time.Minute, Full: true})
+			if got := s.Explore(); (got == other) != tc.tests || got != nil && got != other {
+				t.Errorf("Explore = %v, want a test of %v: %v", got, other, tc.tests)
+			}
+		})
 	}
-	record(c.stats, media, 0, cycle(40, 100)...)
-	record(c.stats, other, time.Hour, cycle(40, 100)...)
-	s.Step(Observation{ReadAhead: time.Minute, Full: true})
-	for range 100 {
-		if got := s.Explore(); got != nil {
-			t.Fatalf("tested %v with the media node and a fallback both keeping up", got)
-		}
-	}
-
-	c, n = testController(t, nil)
-	s, _ = c.Play("tv/1", 40)
-	media, other = s.Node(), n["a"]
-	if media == other {
-		other = n["b"]
-	}
-	record(c.stats, media, 0, cycle(40, 100)...)
-	record(c.stats, other, 24*time.Hour, cycle(40, 100)...)
-	s.Step(Observation{ReadAhead: time.Minute, Full: true})
-	for range 100 {
-		if s.Explore() == other {
-			return
-		}
-	}
-	t.Error("never tested a fallback last seen a day ago")
 }
 
-// TestNoTestOfSlowerNodes: a media node known to be fast out-draws a node
-// known to be slow, so the session tests nothing.
-func TestNoTestOfSlowerNodes(t *testing.T) {
-	c, n := testController(t, nil)
-	s, _ := c.Play("tv/1", 40)
-	media, other := s.Node(), n["a"]
-	if media == other {
-		other = n["b"]
-	}
-	record(c.stats, media, 0, cycle(40, 100)...)
-	record(c.stats, other, 0, cycle(40, 3)...)
-	for range 100 {
-		if got := s.Explore(); got != nil {
-			t.Fatalf("tested %v, known to be slower than the media node", got)
-		}
+// TestMigratesToAFarFasterNode: a session that meets its target moves to a
+// node a test found far faster, once it has been on its node for
+// migrateGap; a node only a little faster never takes it.
+func TestMigratesToAFarFasterNode(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		other float64
+		moves bool
+	}{
+		{"far faster", 120, true},
+		{"a little faster", 36, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, n := testController(t, map[string][]float64{"a": cycle(40, 30, 32, 28), "b": cycle(40, 30, 32, 28)})
+			s, _ := c.Play("tv/1", 10)
+			media, other := s.Node(), n["a"]
+			if media == other {
+				other = n["b"]
+			}
+			record(c.stats, media, 0, cycle(10, 30, 32, 28)...)
+			record(c.stats, other, 0, cycle(4, tc.other)...) // a test, just now
+			full := Observation{ReadAhead: time.Minute, Full: true}
+			if got, _ := s.Step(full); got != nil {
+				t.Fatalf("moved to %v moments after play started", got)
+			}
+			s.started = s.started.Add(-migrateGap)
+			got, why := s.Step(full)
+			switch {
+			case tc.moves && (got != other || why != "faster"):
+				t.Errorf("Step = %v (%s), want a move to %v for speed", got, why, other)
+			case !tc.moves && got != nil:
+				t.Errorf("Step = %v (%s), want stay", got, why)
+			}
+		})
 	}
 }

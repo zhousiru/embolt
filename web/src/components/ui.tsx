@@ -64,17 +64,35 @@ export function Badge({ tone = 'neutral', title, children }: { tone?: keyof type
 
 export const Role = ({ role }: { role: string }) => <Badge tone="accent">{role}</Badge>
 
-/** Stall risk against the target: good under it, warn up to 10×, bad above. */
-export function Risk({ value, target }: { value: number; target: number }) {
-  const tone = value <= target ? 'good' : value <= 10 * target ? 'warn' : 'bad'
+/**
+ * Headroom: a node's safe rate over what the session needs. It meets the
+ * target at 1× or more, when known; a node not known shows "?".
+ */
+export function Headroom({ safe, need, known = true }: { safe: number; need: number; known?: boolean }) {
+  const title = `${mbps(safe)} safe, ${mbps(need)} needed`
+  if (!known) {
+    return (
+      <Badge tone="neutral" title={`${title}; not known`}>
+        ?
+      </Badge>
+    )
+  }
+  if (need <= 0) {
+    return (
+      <Badge tone="good" title={title}>
+        ok
+      </Badge>
+    )
+  }
+  const x = safe / need
   return (
-    <Badge tone={tone} title={`target ${pct(target)}`}>
-      {pct(value)}
+    <Badge tone={x >= 1 ? 'good' : x >= 0.8 ? 'warn' : 'bad'} title={title}>
+      {x.toFixed(1)}×
     </Badge>
   )
 }
 
-/** A belief as its median, with its 90% range and evidence underneath. */
+/** An estimate as its typical value, with its 90% range and evidence underneath. */
 export function Range({ e, unit, digits = 0 }: { e: Estimate; unit: string; digits?: number }) {
   if (!e.measured) return <span className="text-zinc-400 dark:text-zinc-600">—</span>
   return (
@@ -243,7 +261,6 @@ export const Dot = () => (
   <span aria-hidden className="mx-1.5 inline-block size-[3px] shrink-0 rounded-full bg-current align-middle opacity-40" />
 )
 
-export const pct = (x: number) => (x < 0.001 ? '<0.1%' : `${(x * 100).toFixed(x < 0.1 ? 1 : 0)}%`)
 
 export const mbps = (x: number, digits = 1) => `${x.toFixed(digits)} Mbps`
 

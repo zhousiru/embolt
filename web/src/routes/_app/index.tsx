@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useNodes, useStatus } from '#/api/client'
-import { Badge, Buffer, Empty, NodeLink, Panel, Risk, SessionName, Stat, Stats, Ago, clock, mbps } from '#/components/ui'
+import { Badge, Buffer, Empty, NodeLink, Panel, Headroom, SessionName, Stat, Stats, Ago, clock, mbps } from '#/components/ui'
 
 export const Route = createFileRoute('/_app/')({ component: Overview })
 
@@ -46,7 +46,7 @@ function Overview() {
                   </div>
                 </div>
                 <div className="sm:justify-self-end">
-                  <Risk value={s.stallRisk} target={limits.stallRisk} />
+                  <Headroom safe={s.safeMbps} need={s.needMbps} />
                 </div>
               </li>
             ))}

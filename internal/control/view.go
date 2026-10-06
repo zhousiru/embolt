@@ -2,7 +2,6 @@ package control
 
 import (
 	"cmp"
-	"math"
 	"slices"
 	"strings"
 	"time"
@@ -32,7 +31,8 @@ func sessionView(p *Playback) view.Session {
 		BitrateMbps:   p.bitrate,
 		BufferSeconds: p.buffer.Seconds(),
 		LiveMbps:      p.live,
-		StallRisk:     p.risk,
+		SafeMbps:      p.safe,
+		NeedMbps:      p.need,
 		Failovers:     p.failovers,
 		Started:       p.started,
 	}
@@ -51,27 +51,27 @@ func (c *Controller) Session(key string) view.SessionDetail {
 	}
 	now := time.Now()
 	sv := sessionView(p)
-	stay, moves := c.weighStay(p, now), c.moves(p, now)
 	d.Session = &sv
-	if why := c.holds(p, stay, now); why != "" {
-		d.Verdict = &view.Verdict{Reason: why}
-	} else {
-		n, why := c.choose(stay, moves)
-		d.Verdict = &view.Verdict{To: refPtr(n), Reason: why}
+	v := c.decide(p, now)
+	d.Verdict = &view.Verdict{To: refPtr(v.to), Reason: v.why}
+	moves := v.moves
+	if moves == nil {
+		moves = c.moves(p, now)
 	}
-	slices.SortFunc(moves, func(a, b option) int { return cmp.Or(cmp.Compare(a.risk, b.risk), byStall(a, b)) })
-	for i, o := range append([]option{stay}, moves...) {
+	slices.SortFunc(moves, func(a, b option) int { return cmp.Or(cmp.Compare(btoi(!a.meets()), btoi(!b.meets())), bySafe(a, b)) })
+	for i, o := range append([]option{v.stay}, moves...) {
 		role := ""
 		if i == 0 {
 			role = "media"
 		}
 		d.Choices = append(d.Choices, view.Choice{
-			Node:         ref(o.n),
-			Role:         role,
-			GapSeconds:   o.gap.Seconds(),
-			StallRisk:    o.risk,
-			StallSeconds: o.stall,
-			RateMbps:     estimate(o.rate),
+			Node:       ref(o.n),
+			Role:       role,
+			GapSeconds: o.gap.Seconds(),
+			Known:      o.known,
+			SafeMbps:   o.safe,
+			NeedMbps:   max(0, o.need),
+			RateMbps:   estimate(o.rate),
 		})
 	}
 	return d
@@ -88,7 +88,6 @@ func (c *Controller) PrimaryRef() *view.NodeRef {
 func (c *Controller) Limits() view.Limits {
 	k := c.cfg.Load().Control
 	return view.Limits{
-		StallRisk:        k.StallRisk,
 		BufferMinSeconds: BufferMin.Seconds(),
 		ReadAheadSeconds: k.ReadAhead.Seconds(),
 	}
@@ -118,7 +117,7 @@ func (c *Controller) Node(id string) (view.NodeDetail, bool) {
 		return view.NodeDetail{}, false
 	}
 	d := view.NodeDetail{Node: c.nodeView(n, c.roles()[n]), Samples: []view.Sample{}}
-	for _, s := range slices.Backward(c.stats.State(n).Recent) {
+	for _, s := range slices.Backward(c.stats.Recent(n)) {
 		d.Samples = append(d.Samples, view.Sample{
 			Time:   s.Time,
 			Kind:   string(s.Kind),
@@ -169,17 +168,11 @@ func (c *Controller) nodeView(n *nodes.Node, roles []string) view.Node {
 	return v
 }
 
-// estimate shows a log-scale belief on the linear scale: the predictive
-// median and its 90% range.
-func estimate(b measure.Belief) view.Estimate {
-	p := b.Predictive()
-	return view.Estimate{
-		Measured: b.Measured(),
-		Mean:     math.Exp(p.Loc),
-		Low:      math.Exp(p.Quantile(0.05)),
-		High:     math.Exp(p.Quantile(0.95)),
-		Evidence: b.Kappa,
-	}
+// estimate shows a log-scale estimate on the linear scale: its typical
+// value and the 90% range of one sample.
+func estimate(e measure.Estimate) view.Estimate {
+	lo, hi := e.Range()
+	return view.Estimate{Measured: e.Measured(), Mean: e.Typical(), Low: lo, High: hi, Evidence: e.Weight}
 }
 
 // errClass reduces an error to its kind: raw messages can name the node's

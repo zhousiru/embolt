@@ -21,24 +21,9 @@ const (
 	minRateDur  = 200 * time.Millisecond
 	minRateMbps = 0.1 // a stalled window still counts, as very slow
 
-	keepVanished = 7 * 24 * time.Hour
-	recentLen    = 20
-)
-
-// A rate sample's weight in a node's rate now halves every nowHalfLife; it is
-// dropped after nowMemory, when it weighs under 1/1000.
-const (
-	nowHalfLife = 30 * time.Second
-	nowMemory   = 10 * nowHalfLife
-)
-
-// prior is a log-scale centre and spread.
-type prior struct{ mu, sigma float64 }
-
-// Fallback priors when no node has data yet: 20 Mbps and 150 ms, wide.
-var (
-	defaultRate = prior{math.Log(20), 1.0}
-	defaultRTT  = prior{math.Log(150), 0.6}
+	recentHalfLife = 30 * time.Second // of a node's rate now, see State
+	keepVanished   = 7 * 24 * time.Hour
+	recentLen      = 20
 )
 
 type Kind string
@@ -69,70 +54,55 @@ func (s Sample) Mbps() float64 {
 	return max(float64(s.Bytes)*8/s.Dur.Seconds()/1e6, minRateMbps)
 }
 
-// State is a copy of what is known about one node. Rate is its typical rate,
-// which fades over hours; Now is its rate over the next minutes, see rateNow.
+// State is a copy of what is known about one node, in log-ms and log-Mbps.
+// Rate is its typical rate, which fades over half_life; Now is its rate over
+// the next minutes: the typical rate worth one sample, pooled with its
+// samples of the last minute or so. A node seen sagging half a minute ago is
+// judged by the sag; one that sagged minutes ago by its typical rate again.
 type State struct {
-	RTT, Rate Belief
-	Now       Belief
+	RTT, Rate Estimate
+	Now       Estimate
 	OpenUntil time.Time
-	Recent    []Sample
 }
 
 func (s State) Open(now time.Time) bool { return now.Before(s.OpenUntil) }
 
-// Stats holds every node's beliefs and breaker, and logs every sample.
+// Stats holds every node's estimates and breaker.
 type Stats struct {
 	cfg *config.Store
-	log *sampleLog
 
 	mu    sync.Mutex
 	nodes map[string]*entry
 }
 
 type entry struct {
-	Provider string    `json:"provider"`
-	RTT      Belief    `json:"rtt"`
-	Rate     Belief    `json:"rate"`
-	Seen     time.Time `json:"seen"`
-	breaker  breaker
-	recent   []Sample
-	rates    []rateAt // within nowMemory
+	RTT     Estimate  `json:"rtt"`
+	Rate    Estimate  `json:"rate"`
+	Seen    time.Time `json:"seen"`
+	recent  Estimate  // rate, over recentHalfLife
+	breaker breaker
+	samples []Sample
 }
 
-// rateAt is a rate sample: its log-Mbps and when it was taken.
-type rateAt struct {
-	at time.Time
-	x  float64
+// NewStats keeps estimates for every node.
+func NewStats(cfg *config.Store) *Stats {
+	return &Stats{cfg: cfg, nodes: map[string]*entry{}}
 }
 
-// NewStats keeps beliefs for every node and appends samples to sampleDir,
-// unless it is empty.
-func NewStats(cfg *config.Store, sampleDir string) *Stats {
-	s := &Stats{cfg: cfg, nodes: map[string]*entry{}}
-	if sampleDir != "" {
-		s.log = &sampleLog{dir: sampleDir}
-	}
-	return s
-}
-
-// Record folds a sample into the node's beliefs and breaker.
+// Record folds a sample into the node's estimates and breaker.
 func (s *Stats) Record(n *nodes.Node, smp Sample) {
 	smp.Node = n.ID
 	if smp.Time.IsZero() {
 		smp.Time = time.Now()
 	}
-	if s.log != nil {
-		s.log.write(smp)
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e := s.entry(n)
 	hl := s.cfg.Load().Control.HalfLife
 	e.Seen = smp.Time
-	e.recent = append(e.recent, smp)
-	if len(e.recent) > recentLen {
-		e.recent = e.recent[1:]
+	e.samples = append(e.samples, smp)
+	if len(e.samples) > recentLen {
+		e.samples = e.samples[1:]
 	}
 	if e.breaker.record(smp.Err == "", smp.Time) {
 		slog.Warn("breaker open", "node", n.Name, "until", e.breaker.until.Format(time.TimeOnly), "err", smp.Err)
@@ -145,8 +115,7 @@ func (s *Stats) Record(n *nodes.Node, smp Sample) {
 	}
 	if r := smp.Mbps(); r > 0 {
 		e.Rate.Observe(math.Log(r), smp.Time, hl)
-		e.rates = append(slices.DeleteFunc(e.rates, func(old rateAt) bool { return smp.Time.Sub(old.at) > nowMemory }),
-			rateAt{smp.Time, math.Log(r)})
+		e.recent.Observe(math.Log(r), smp.Time, recentHalfLife)
 	}
 }
 
@@ -158,91 +127,58 @@ func (s *Stats) Healthy(n *nodes.Node) {
 	s.entry(n).breaker.record(true, time.Now())
 }
 
-// State returns the node's beliefs as of now; a node never seen starts from
-// its provider's pooled belief.
+// State returns the node's estimates as of now.
 func (s *Stats) State(n *nodes.Node) State { return s.StateAt(n, time.Now()) }
 
-// StateAt returns the node's beliefs as of a given time.
+// StateAt returns the node's estimates as of a given time.
 func (s *Stats) StateAt(n *nodes.Node, now time.Time) State {
 	hl := s.cfg.Load().Control.HalfLife
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e := s.entry(n)
 	rate := e.Rate.AsOf(now, hl)
+	typical := rate
+	typical.Weight = min(typical.Weight, 1)
 	return State{
 		RTT:       e.RTT.AsOf(now, hl),
 		Rate:      rate,
-		Now:       rateNow(rate, e.rates, now),
+		Now:       typical.with(e.recent.AsOf(now, recentHalfLife)),
 		OpenUntil: e.breaker.until,
-		Recent:    append([]Sample(nil), e.recent...),
 	}
 }
 
-// rateNow is a node's rate over the next minutes: its typical rate worth one
-// sample, then its rate samples from any session, each weighed by its age. A
-// node seen sagging half a minute ago is judged by the sag; one that sagged
-// minutes ago by its typical rate again, with the doubt of a node not seen
-// lately. The node a session reads and the nodes it might move to are judged
-// alike.
-func rateNow(typical Belief, rates []rateAt, now time.Time) Belief {
-	b := typical.Capped(1)
-	for _, r := range rates {
-		b.add(r.x, math.Exp2(-max(0, now.Sub(r.at).Seconds())/nowHalfLife.Seconds()))
+// Open reports whether n's breaker is open.
+func (s *Stats) Open(n *nodes.Node, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e := s.nodes[n.ID]
+	return e != nil && now.Before(e.breaker.until)
+}
+
+// Recent returns n's latest samples, oldest first.
+func (s *Stats) Recent(n *nodes.Node) []Sample {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e := s.nodes[n.ID]; e != nil {
+		return slices.Clone(e.samples)
 	}
-	return b
+	return nil
 }
 
 func (s *Stats) entry(n *nodes.Node) *entry {
 	if e := s.nodes[n.ID]; e != nil {
 		return e
 	}
-	strength := s.cfg.Load().Control.PriorStrength
-	e := &entry{
-		Provider: n.Provider,
-		RTT:      s.pooled(n.Provider, func(e *entry) Belief { return e.RTT }, defaultRTT, strength),
-		Rate:     s.pooled(n.Provider, func(e *entry) Belief { return e.Rate }, defaultRate, strength),
-	}
+	e := &entry{}
 	s.nodes[n.ID] = e
 	return e
 }
 
-// pooled builds a prior worth strength samples from the measured nodes of
-// the same provider, else of all providers, else the fallback.
-func (s *Stats) pooled(provider string, get func(*entry) Belief, fallback prior, strength float64) Belief {
-	for _, sameProvider := range []bool{true, false} {
-		var mus, vars []float64
-		for _, e := range s.nodes {
-			b := get(e)
-			if b.Measured() && (!sameProvider || e.Provider == provider) {
-				mus = append(mus, b.Mu)
-				vars = append(vars, b.Beta/b.Alpha)
-			}
-		}
-		if len(mus) > 0 {
-			mu, within := mean(mus), mean(vars)
-			between := 0.0
-			for _, m := range mus {
-				between += (m - mu) * (m - mu) / float64(len(mus))
-			}
-			return NewBelief(mu, math.Sqrt(within+between), strength)
-		}
-	}
-	return NewBelief(fallback.mu, fallback.sigma, strength)
-}
-
-func mean(xs []float64) float64 {
-	sum := 0.0
-	for _, x := range xs {
-		sum += x
-	}
-	return sum / float64(len(xs))
-}
-
-// Persist restores beliefs from path, then saves them every 5 min and on
+// Persist restores estimates from path, then saves them every 5 min and on
 // exit. Recent samples, which only the pane shows, start empty.
 func (s *Stats) Persist(ctx context.Context, path string) {
 	if err := s.Restore(path); err != nil {
-		slog.Warn("could not restore beliefs; starting fresh", "err", err)
+		slog.Warn("could not restore estimates; starting fresh", "err", err)
 	}
 	tick := time.NewTicker(5 * time.Minute)
 	defer tick.Stop()
@@ -252,7 +188,7 @@ func (s *Stats) Persist(ctx context.Context, path string) {
 		case <-tick.C:
 		}
 		if err := s.Save(path); err != nil {
-			slog.Error("could not save beliefs", "err", err)
+			slog.Error("could not save estimates", "err", err)
 		}
 		if ctx.Err() != nil {
 			return
@@ -260,7 +196,7 @@ func (s *Stats) Persist(ctx context.Context, path string) {
 	}
 }
 
-// Save writes beliefs to path, dropping nodes unseen for 7 days.
+// Save writes estimates to path, dropping nodes unseen for 7 days.
 func (s *Stats) Save(path string) error {
 	s.mu.Lock()
 	for id, e := range s.nodes {
@@ -280,7 +216,7 @@ func (s *Stats) Save(path string) error {
 	return os.Rename(tmp, path)
 }
 
-// Restore loads beliefs saved by Save; a missing file is not an error.
+// Restore loads estimates saved by Save; a missing file is not an error.
 func (s *Stats) Restore(path string) error {
 	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {

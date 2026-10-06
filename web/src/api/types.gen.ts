@@ -22,7 +22,6 @@ export interface Status {
  * Limits are the control settings the pane draws against.
  */
 export interface Limits {
-  stallRisk: number /* float64 */; // the target
   bufferMinSeconds: number /* float64 */;
   readAheadSeconds: number /* float64 */;
 }
@@ -37,7 +36,8 @@ export interface Session {
   bitrateMbps: number /* float64 */;
   bufferSeconds: number /* float64 */;
   liveMbps: number /* float64 */;
-  stallRisk: number /* float64 */; // of its media node, at its buffer and bitrate
+  safeMbps: number /* float64 */; // what its media node keeps to, see Choice
+  needMbps: number /* float64 */; // what it needs over the horizon at its buffer
   failovers: number /* int */;
   started: string;
   item?: Item; // unknown until a player fetches the item's details
@@ -75,20 +75,22 @@ export interface Verdict {
 }
 /**
  * Choice is one node as the session's step judges it: staying on the media
- * node, or switching to another, which delivers nothing for its gap.
+ * node, or switching to another, which delivers nothing for its gap. It
+ * meets the target when it is known and SafeMbps covers NeedMbps.
  */
 export interface Choice {
   node: NodeRef;
   role: string; // media or ""
   gapSeconds: number /* float64 */;
-  stallRisk: number /* float64 */;
-  stallSeconds: number /* float64 */; // expected over the horizon
+  known: boolean; // enough recent samples to trust
+  safeMbps: number /* float64 */; // its rate now, one spread under the typical
+  needMbps: number /* float64 */; // to keep the buffer over its low mark, after the gap
   rateMbps: Estimate; // as judged: the media node's includes the stream's samples
 }
 /**
- * Estimate summarizes a belief: its predictive median and 90% range, and
- * how many samples' worth of evidence it holds after fade-out. Unmeasured,
- * it is only the starting guess every new node shares.
+ * Estimate summarizes a node's measurements: their typical value and the
+ * 90% range of one sample, and how many samples' worth of evidence remain
+ * after fade-out.
  */
 export interface Estimate {
   measured: boolean;

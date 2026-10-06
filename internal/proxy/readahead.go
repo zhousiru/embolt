@@ -510,9 +510,9 @@ func (f *file) supervise(ctx context.Context) {
 		if mf == nil || play == nil {
 			continue // nothing played: nothing to judge
 		}
-		if n := play.Step(obs); n != nil {
+		if n, why := play.Step(obs); n != nil {
 			for _, fd := range feeds {
-				fd.redirect(switchTo{n})
+				fd.redirect(switchTo{n, why})
 			}
 			continue
 		}

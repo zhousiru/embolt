@@ -53,7 +53,7 @@ func serve(args []string) error {
 	}
 
 	pool := nodes.NewPool(store)
-	stats := measure.NewStats(store, filepath.Join(cfg.DataDir, "samples"))
+	stats := measure.NewStats(store)
 	ctrl := control.New(store, pool, stats)
 	prof, err := profile.Open(filepath.Join(cfg.DataDir, "profile.json"))
 	if err != nil {
@@ -71,7 +71,7 @@ func serve(args []string) error {
 	g.Go(func() error { store.Watch(ctx); return nil })
 	g.Go(func() error { pool.Run(ctx); return nil })
 	g.Go(func() error { ctrl.Run(ctx); return nil })
-	g.Go(func() error { stats.Persist(ctx, filepath.Join(cfg.DataDir, "beliefs.json")); return nil })
+	g.Go(func() error { stats.Persist(ctx, filepath.Join(cfg.DataDir, "estimates.json")); return nil })
 	g.Go(func() error { prof.Persist(ctx); return nil })
 
 	listen(ctx, g, "ingress", cfg.Listen, px, "", "")

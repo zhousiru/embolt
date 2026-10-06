@@ -47,10 +47,14 @@ var (
 	chunks = sync.Pool{New: func() any { return new([chunkSize]byte) }}
 )
 
-// switchTo is the cause given when the controller moves a feed.
-type switchTo struct{ n *nodes.Node }
+// switchTo is the cause given when the controller moves a feed, and why:
+// "risk" or "faster".
+type switchTo struct {
+	n   *nodes.Node
+	why string
+}
 
-func (switchTo) Error() string { return "risk" }
+func (sw switchTo) Error() string { return sw.why }
 
 // feed fills one span from upstream. It opens the span's range on the
 // session's media node, and when the node fails, resumes at the span's end
@@ -308,8 +312,8 @@ func (fd *feed) awaitRoom(a *attempt) error {
 	return nil
 }
 
-// resume reopens the remaining range after an interruption. A risk switch
-// goes to the controller's choice; a stall or error fails over to the best
+// resume reopens the remaining range after an interruption. A controller's
+// switch goes to its choice; a stall or error fails over to the best
 // other node, or follows the session if another feed already moved it; a
 // pause reopens on the session's media node once the players have drained
 // half the read-ahead. Only a node that cannot connect is failed over: any
@@ -325,7 +329,7 @@ func (fd *feed) resume(ctx context.Context, cause error) (*http.Response, error)
 	var sw switchTo
 	switch {
 	case errors.As(cause, &sw):
-		n, reason = sw.n, "risk"
+		n, reason = sw.n, sw.why
 	case errors.Is(cause, errPaused):
 		if err := fd.waitForRoom(ctx); err != nil {
 			return nil, err

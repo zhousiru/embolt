@@ -72,7 +72,7 @@ type route struct {
 	lane     lane
 	target   *url.URL // upstream base, or a stream host
 	node     *nodes.Node
-	alt      *nodes.Node // one retry for HLS segments
+	play     *control.Stream // set for HLS segments, which retry once on another node
 	cacheKey string
 }
 
@@ -127,7 +127,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer play.Release()
 		rt.node = play.Node()
 		if rt.lane == laneHLS && !strings.HasSuffix(strings.ToLower(r.URL.Path), ".m3u8") {
-			rt.alt = play.Failover(rt.node)
+			rt.play = play
 		}
 	}
 	s.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), routeKey{}, rt)))
@@ -139,12 +139,10 @@ func (s *Server) rewrite(pr *httputil.ProxyRequest) {
 	rt := routeOf(pr.In)
 	pr.SetURL(rt.target)
 	s.fixHeaders(pr.Out.Header, rt.target)
-	local := s.local() && rt.lane == laneControl && rt.cacheKey == ""
-	if local || reInfo.MatchString(pr.In.URL.Path) || reDetails.MatchString(pr.In.URL.Path) || rt.lane == laneHLS {
+	if s.overlays(rt) {
+		askPlain(pr.Out.Header)
+	} else if reInfo.MatchString(pr.In.URL.Path) || reDetails.MatchString(pr.In.URL.Path) || rt.lane == laneHLS {
 		pr.Out.Header.Del("Accept-Encoding") // bodies we rewrite must arrive plain
-	}
-	if local && isWebsocket(pr.Out.Header) {
-		pr.Out.Header.Del("Sec-Websocket-Extensions") // frames we edit must arrive uncompressed
 	}
 }
 
@@ -171,10 +169,8 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		}
 	}
 	path := resp.Request.URL.Path
-	if s.local() && rt.lane == laneControl && rt.cacheKey == "" {
-		if conn, ok := resp.Body.(io.ReadWriteCloser); ok && resp.StatusCode == http.StatusSwitchingProtocols {
-			resp.Body = newWSFilter(conn, s.userDataMessage)
-		} else if err := s.overlayResponse(resp); err != nil {
+	if s.overlays(rt) {
+		if err := s.overlayAnswer(resp); err != nil {
 			return err
 		}
 	}
@@ -248,8 +244,10 @@ type routeTransport struct{ s *Server }
 func (t routeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	rt := routeOf(req)
 	resp, err := t.s.send(rt.node, req, rt.lane == laneControl)
-	if err != nil && rt.alt != nil && req.Context().Err() == nil {
-		return t.s.send(rt.alt, req, false)
+	if err != nil && rt.play != nil && req.Context().Err() == nil {
+		if alt := rt.play.Failover(rt.node); alt != nil {
+			return t.s.send(alt, req, false)
+		}
 	}
 	return resp, err
 }

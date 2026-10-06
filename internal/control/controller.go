@@ -1,18 +1,14 @@
-// Package control is the adaptive controller: observe → update beliefs →
-// predict stall risk → take the cheapest safe action. It assigns the two
-// roles, primary and media; the proxy asks for a role, never a node.
+// Package control assigns the two roles, primary and media, from each node's
+// measured rate and RTT; the proxy asks for a role, never a node. Every
+// choice it makes is logged at info, with what it weighed, so a deployment's
+// logs show the strategy at work.
 package control
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"log/slog"
-	"maps"
-	"math"
-	"math/rand/v2"
 	"net/url"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,8 +22,7 @@ import (
 )
 
 const (
-	primaryMargin = 100 * time.Millisecond // on a burst, see burstTime
-	primaryConf   = 0.95
+	primaryMargin = 100.0 // ms a known node's burst must be quicker by to take the primary, see burstMs
 	activeWindow  = 10 * time.Minute
 	playLinger    = 2 * time.Minute // keeps a session's nodes across seeks
 	firstRunMbps  = 40.0            // the bitrate to judge at before any session reports one
@@ -142,14 +137,15 @@ func (c *Controller) primaryGone() bool {
 
 func (c *Controller) setPrimary(n *nodes.Node) {
 	if n != nil && n != c.primary {
-		slog.Info("primary switched", "from", c.primary, "to", n.Name)
+		slog.Info("primary switched", "from", c.primary, "to", n.Name,
+			"from_burst_ms", c.burstLog(c.primary), "to_burst_ms", c.burstLog(n))
 	}
 	c.primary = n
 }
 
 // reconsiderPrimary runs after each ping round. Another node takes over only
-// when P(its burst is 100 ms quicker) ≥ 95% and nothing is playing: the
-// beliefs' own doubt is the hysteresis.
+// when nothing is playing, its RTT is known, and its burst is primaryMargin
+// quicker.
 func (c *Controller) reconsiderPrimary() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -157,8 +153,8 @@ func (c *Controller) reconsiderPrimary() {
 		c.setPrimary(c.quickest(c.usable(nil)))
 		return
 	}
-	best := c.quickest(c.usable(func(n *nodes.Node) bool { return n != c.primary }))
-	if best != nil && !c.playing() && probFaster(c.burst(best), c.burst(c.primary), primaryMargin) >= primaryConf {
+	best := c.quickest(c.usable(func(n *nodes.Node) bool { return n != c.primary && c.stats.State(n).RTT.Known() }))
+	if best != nil && !c.playing() && c.burst(best)+primaryMargin < c.burst(c.primary) {
 		c.setPrimary(best)
 	}
 }
@@ -166,7 +162,10 @@ func (c *Controller) reconsiderPrimary() {
 func (c *Controller) pingAll(ctx context.Context) {
 	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
-	for _, n := range c.pool.All() {
+	start := time.Now()
+	var ok atomic.Int32
+	all := c.pool.All()
+	for _, n := range all {
 		wg.Go(func() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
@@ -174,27 +173,15 @@ func (c *Controller) pingAll(ctx context.Context) {
 			defer cancel()
 			if s, err := measure.Ping(ctx, n, c.base); err == nil {
 				c.stats.Record(n, s)
+				if s.Err == "" {
+					ok.Add(1)
+				}
 			}
 		})
 	}
 	wg.Wait()
+	slog.Info("pinged", "nodes", len(all), "ok", ok.Load(), "took_s", round1(time.Since(start).Seconds()))
 	c.reconsiderPrimary()
-}
-
-// byDraw ranks nodes by one draw each from the posterior of their typical
-// rate, highest first: Thompson sampling. A node that may be fast but is
-// barely measured often draws high, a node known to be slow seldom does, and
-// a node known to be fast does now and then, which keeps the fallbacks'
-// beliefs fresh. As beliefs fade, the draws spread and exploration widens
-// again.
-func byDraw(beliefs map[*nodes.Node]measure.Belief) []*nodes.Node {
-	draw := make(map[*nodes.Node]float64, len(beliefs))
-	for n, b := range beliefs {
-		draw[n] = b.Mean().Quantile(rand.Float64())
-	}
-	ranked := slices.Collect(maps.Keys(draw))
-	slices.SortFunc(ranked, func(a, b *nodes.Node) int { return cmp.Compare(draw[b], draw[a]) })
-	return ranked
 }
 
 // typicalMbps is the bitrate to judge at when none is known: the highest
@@ -222,7 +209,8 @@ func (c *Controller) expire() {
 	for key, p := range c.plays {
 		if len(p.streams) == 0 && time.Since(p.idle) > playLinger {
 			delete(c.plays, key)
-			slog.Info("playback ended", "session", key, "failovers", p.failovers)
+			slog.Info("playback ended", "session", key, "media", p.node.Name, "failovers", p.failovers,
+				"tests", p.tests, "minutes", round1(p.idle.Sub(p.started).Minutes()))
 		}
 	}
 }
@@ -238,7 +226,7 @@ func (c *Controller) usable(keep func(*nodes.Node) bool) []*nodes.Node {
 	return out
 }
 
-func (c *Controller) open(n *nodes.Node) bool { return c.stats.State(n).Open(time.Now()) }
+func (c *Controller) open(n *nodes.Node) bool { return c.stats.Open(n, time.Now()) }
 
 func (c *Controller) pinned(ref string) *nodes.Node {
 	if n := c.pool.Find(ref); n != nil && !c.open(n) {
@@ -247,32 +235,22 @@ func (c *Controller) pinned(ref string) *nodes.Node {
 	return nil
 }
 
-// quickest ranks by the 90% upper bound of the burst time. A node with no
-// speed data keeps a wide pooled prior, so it ranks behind a measured node of
-// the same speed; one with no measured RTT ranks last, as in rttKey.
+// quickest is the node with the shortest burst time.
 func (c *Controller) quickest(ns []*nodes.Node) *nodes.Node {
-	return minBy(ns, func(n *nodes.Node) float64 {
-		if !c.stats.State(n).RTT.Measured() {
-			return math.Inf(1)
-		}
-		return c.burst(n).upper()
-	})
+	return minBy(ns, c.burst)
 }
 
-func (c *Controller) burst(n *nodes.Node) timing {
-	st := c.stats.State(n)
-	return burstTime(st.RTT, st.Rate)
-}
+func (c *Controller) burst(n *nodes.Node) float64 { return burstMs(c.stats.State(n)) }
 
-// rttKey is the 90% upper bound of a node's typical RTT: low only when the
-// node is both fast and well measured. Unmeasured, it ranks last, so a guess
-// never beats a measurement.
-func (c *Controller) rttKey(n *nodes.Node) float64 {
-	rtt := c.stats.State(n).RTT
-	if !rtt.Measured() {
-		return math.Inf(1)
+// burstLog is n's burst time for the logs: -1 for none.
+func (c *Controller) burstLog(n *nodes.Node) float64 {
+	if n == nil {
+		return -1
 	}
-	return rtt.Mean().Quantile(0.9)
+	if b := c.burst(n); b < 1e9 {
+		return round1(b)
+	}
+	return -1
 }
 
 func minBy[T any](xs []T, key func(T) float64) T {

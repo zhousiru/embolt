@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useStatus } from '#/api/client'
-import { Buffer, Dot, Empty, NodeLink, Panel, Risk, SessionName, Table, Ago, mbps, td } from '#/components/ui'
+import { Buffer, Dot, Empty, NodeLink, Panel, Headroom, SessionName, Table, Ago, mbps, td } from '#/components/ui'
 
 export const Route = createFileRoute('/_app/sessions/')({ component: Sessions })
 
@@ -21,7 +21,7 @@ function Sessions() {
       {sessions.length === 0 ? (
         <Empty>Nothing playing</Empty>
       ) : (
-        <Table head={['Session', 'Media', 'Read-ahead', 'Rate', 'Risk', 'Failovers']}>
+        <Table head={['Session', 'Media', 'Read-ahead', 'Rate', 'Headroom', 'Failovers']}>
           {sessions.map((s) => (
             <tr key={s.key} className={s.streams === 0 ? 'opacity-50' : undefined}>
               <td className={`${td} max-w-80`}>
@@ -46,7 +46,7 @@ function Sessions() {
                 <span className="text-zinc-500"> / {mbps(s.bitrateMbps)}</span>
               </td>
               <td className={td}>
-                <Risk value={s.stallRisk} target={limits.stallRisk} />
+                <Headroom safe={s.safeMbps} need={s.needMbps} />
               </td>
               <td className={`${td} text-zinc-500`}>{s.failovers}</td>
             </tr>

@@ -21,7 +21,6 @@ const usage = `usage: embolt <command> [flags]
 
 commands:
   serve        run the proxy and the pane
-  replay       run the model over logged samples and report its calibration
   healthcheck  exit 0 if the local pane answers /healthz
   version      print the version
 `
@@ -36,8 +35,6 @@ func main() {
 	switch cmd {
 	case "serve":
 		err = serve(args)
-	case "replay":
-		err = replay(args)
 	case "healthcheck":
 		err = healthcheck(args)
 	case "version":

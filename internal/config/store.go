@@ -33,7 +33,7 @@ func Open(path string) (*Store, error) {
 	return s, nil
 }
 
-// Static wraps a fixed config; used by tests and the replay command.
+// Static wraps a fixed config; used by tests.
 func Static(c *Config) *Store {
 	s := &Store{}
 	s.cur.Store(c)

@@ -18,7 +18,6 @@ type Status struct {
 
 // Limits are the control settings the pane draws against.
 type Limits struct {
-	StallRisk        float64 `json:"stallRisk"` // the target
 	BufferMinSeconds float64 `json:"bufferMinSeconds"`
 	ReadAheadSeconds float64 `json:"readAheadSeconds"`
 }
@@ -35,7 +34,8 @@ type Session struct {
 	BitrateMbps   float64   `json:"bitrateMbps"`
 	BufferSeconds float64   `json:"bufferSeconds"`
 	LiveMbps      float64   `json:"liveMbps"`
-	StallRisk     float64   `json:"stallRisk"` // of its media node, at its buffer and bitrate
+	SafeMbps      float64   `json:"safeMbps"` // what its media node keeps to, see Choice
+	NeedMbps      float64   `json:"needMbps"` // what it needs over the horizon at its buffer
 	Failovers     int       `json:"failovers"`
 	Started       time.Time `json:"started"`
 	Item          *Item     `json:"item,omitempty"` // unknown until a player fetches the item's details
@@ -70,19 +70,21 @@ type Verdict struct {
 }
 
 // Choice is one node as the session's step judges it: staying on the media
-// node, or switching to another, which delivers nothing for its gap.
+// node, or switching to another, which delivers nothing for its gap. It
+// meets the target when it is known and SafeMbps covers NeedMbps.
 type Choice struct {
-	Node         NodeRef  `json:"node"`
-	Role         string   `json:"role"` // media or ""
-	GapSeconds   float64  `json:"gapSeconds"`
-	StallRisk    float64  `json:"stallRisk"`
-	StallSeconds float64  `json:"stallSeconds"` // expected over the horizon
-	RateMbps     Estimate `json:"rateMbps"`     // as judged: the media node's includes the stream's samples
+	Node       NodeRef  `json:"node"`
+	Role       string   `json:"role"` // media or ""
+	GapSeconds float64  `json:"gapSeconds"`
+	Known      bool     `json:"known"`    // enough recent samples to trust
+	SafeMbps   float64  `json:"safeMbps"` // its rate now, one spread under the typical
+	NeedMbps   float64  `json:"needMbps"` // to keep the buffer over its low mark, after the gap
+	RateMbps   Estimate `json:"rateMbps"` // as judged: the media node's includes the stream's samples
 }
 
-// Estimate summarizes a belief: its predictive median and 90% range, and
-// how many samples' worth of evidence it holds after fade-out. Unmeasured,
-// it is only the starting guess every new node shares.
+// Estimate summarizes a node's measurements: their typical value and the
+// 90% range of one sample, and how many samples' worth of evidence remain
+// after fade-out.
 type Estimate struct {
 	Measured bool    `json:"measured"`
 	Mean     float64 `json:"mean"`

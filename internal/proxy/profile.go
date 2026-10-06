@@ -51,6 +51,35 @@ var (
 
 func (s *Server) local() bool { return s.cfg.Load().LocalProfile() }
 
+// The local profile meets the proxy at three points: serveProfile answers
+// what the profile owns; for the rest, askPlain shapes the upstream request
+// and overlayAnswer edits the answer, wherever overlays says it applies.
+
+// overlays reports whether the local profile edits the answer to a request
+// on rt: control traffic other than a cached image.
+func (s *Server) overlays(rt *route) bool {
+	return s.local() && rt.lane == laneControl && rt.cacheKey == ""
+}
+
+// askPlain asks upstream for an answer the profile can edit: a plain body,
+// and websocket frames without compression.
+func askPlain(h http.Header) {
+	h.Del("Accept-Encoding")
+	if isWebsocket(h) {
+		h.Del("Sec-Websocket-Extensions")
+	}
+}
+
+// overlayAnswer puts the local profile into the server's answer: its JSON
+// body, or the messages of its websocket.
+func (s *Server) overlayAnswer(resp *http.Response) error {
+	if conn, ok := resp.Body.(io.ReadWriteCloser); ok && resp.StatusCode == http.StatusSwitchingProtocols {
+		resp.Body = newWSFilter(conn, s.userDataMessage)
+		return nil
+	}
+	return s.overlayResponse(resp)
+}
+
 // serveProfile answers what the local profile owns and records playback
 // reports. It reports whether it wrote the response; if not, the request
 // goes on to the server.

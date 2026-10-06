@@ -18,7 +18,7 @@ proxy-providers:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Control.StallRisk != 0.01 || c.Control.HalfLife != 2*time.Hour || c.Listen != ":8096" {
+	if c.Control.HalfLife != 2*time.Hour || c.Listen != ":8096" {
 		t.Errorf("defaults not applied: %+v", c.Control)
 	}
 	p := c.Providers["data"]
@@ -30,9 +30,9 @@ proxy-providers:
 func TestValidation(t *testing.T) {
 	_, err := Parse([]byte(`
 upstream: {url: "not a url", redirect: maybe}
-control: {stall_risk: 2}
+control: {half_life: -1h}
 `))
-	for _, want := range []string{"upstream.url", "upstream.redirect", "no nodes", "stall_risk"} {
+	for _, want := range []string{"upstream.url", "upstream.redirect", "no nodes", "durations"} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("error %v does not mention %s", err, want)
 		}

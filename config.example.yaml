@@ -30,10 +30,8 @@ proxy-providers:
 #   media: ""
 
 # control:
-#   stall_risk: 0.01        # target probability of a stall
 #   read_ahead: 60s         # media buffered ahead of the player
 #   half_life: 2h           # how fast old measurements fade
-#   prior_strength: 2       # a new node's prior, in samples; check both with `embolt replay`
 
 # profile: upstream         # "local": progress, played, favorites, likes and
 #                           # preferences stay in data_dir/profile.json, so people

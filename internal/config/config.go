@@ -93,13 +93,10 @@ func (d DNS) equal(o DNS) bool {
 		slices.Equal(d.ProxyServerNameserver, o.ProxyServerNameserver) && slices.Equal(d.Nameserver, o.Nameserver)
 }
 
-// Control tunes the adaptive controller; replay checks half_life and
-// prior_strength on your own data.
+// Control tunes the controller.
 type Control struct {
-	StallRisk     float64       `yaml:"stall_risk"`
-	HalfLife      time.Duration `yaml:"half_life"`
-	PriorStrength float64       `yaml:"prior_strength"`
-	ReadAhead     time.Duration `yaml:"read_ahead"`
+	HalfLife  time.Duration `yaml:"half_life"`  // how fast a node's measurements fade
+	ReadAhead time.Duration `yaml:"read_ahead"` // media buffered ahead of the player
 }
 
 // Probes tune exploration, the only speed test: a session reads a stretch
@@ -134,10 +131,8 @@ func Default() *Config {
 		Listen:   ":8096",
 		Upstream: Upstream{Redirect: "follow"},
 		Control: Control{
-			StallRisk:     0.01,
-			HalfLife:      2 * time.Hour,
-			PriorStrength: 2,
-			ReadAhead:     60 * time.Second,
+			HalfLife:  2 * time.Hour,
+			ReadAhead: 60 * time.Second,
 		},
 		Probes:  Probes{Budget: 0.05},
 		Cache:   Cache{SizeMB: 2048},
@@ -190,9 +185,7 @@ func (c *Config) validate() error {
 		c.Providers[name] = p
 	}
 	k := c.Control
-	check(k.StallRisk > 0 && k.StallRisk < 1, "control.stall_risk: want (0, 1)")
 	check(k.HalfLife > 0 && k.ReadAhead > 0, "control: durations must be positive")
-	check(k.PriorStrength > 0, "control: prior_strength must be positive")
 	check(c.Probes.Budget >= 0 && c.Probes.Budget < 1, "probes.budget: want [0, 1)")
 	check((c.TLS.Listen == "") == (c.TLS.Cert == "") && (c.TLS.Cert == "") == (c.TLS.Key == ""),
 		"tls: set listen, cert and key together")

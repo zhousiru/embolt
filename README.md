@@ -11,11 +11,11 @@ through the [mihomo](https://github.com/metacubex/mihomo) node best suited to it
   on the best other node at the next byte, and the player never sees the
   switch.
 
-Nodes rank themselves from real traffic to your Emby server. Each node holds
-a learned belief about its rate and RTT; one controller keeps the predicted
-probability of a stall under 1%, and moves a session only when it must, so
-each playback reads through one exit IP whenever possible, plus a second for
-the few seconds of a speed test.
+Nodes rank themselves from real traffic to your Emby server. One controller
+keeps each session on a node known to deliver what its buffer needs, and
+moves it when that node falls short, or when a speed test finds a node far
+faster, so each playback reads through one exit IP for long stretches, plus
+a second for the few seconds of a speed test.
 
 Embolt is not affiliated with Emby LLC, and it is not a tool for evading a
 server's rules on IPs, streams or downloads.
@@ -29,50 +29,74 @@ docker compose up -d                        # edit compose.yaml's OWNER first
 ```
 
 Point your Emby apps at `http://<host>:8096` instead of the server. The pane
-is on `http://<host>:9090`: roles, every node's beliefs, and each session with
-its buffer, stall risk, the node choice its controller faces, and its events.
+is on `http://<host>:9090`: roles, every node's estimates, and each session with
+its buffer, headroom, the node choice its controller faces, and its events.
 It is read-only and never shows a
 secret; to change anything, edit the config, which reloads by itself.
 
 | Path | Purpose |
 | --- | --- |
 | `/config/config.yaml` | config, mounted read-only |
-| `/data` | beliefs, sample log, image cache, last good subscriptions |
+| `/data` | node estimates, image cache, last good subscriptions |
 | `:8096` (`:8920` with TLS) | Emby-compatible ingress |
 | `:9090` | pane, `/api/v1/*`, `/metrics`, `/healthz` |
 
 ## How it decides
 
+Every node keeps an exponentially weighted mean and spread of its log-rate,
+whose evidence halves every 2 h (`half_life`), and the same of its RTT from
+pings. Its *rate now* adds its samples of the last minute or so, so a sag
+half a minute old decides. Its *safe rate* is the rate now one spread under
+the typical: what it keeps to most of the time. A node is *known* with three
+samples' worth of evidence left; a node left alone fades until it is not.
+
 For a buffer of *B* seconds, bitrate *V*, low mark *B*<sub>min</sub> = 10 s and
-horizon *H* = 120 s, the buffer holds only if the next *H* seconds average
-more than *V* · (1 − (*B* − *B*<sub>min</sub>) / *H*). Each node's rate belief
-is a Normal–Inverse-Gamma posterior on log-rate whose evidence halves every
-2 h; its Student-t predictive gives the probability of falling short. Every
-2 s, each session takes the cheapest action that keeps that probability at or
-under 1%: stay, or switch to the best other node. No byte
-for 4 s, or a connection error, fails over at once.
+horizon *H* = 120 s, a session needs *V* · (1 − (*B* − *B*<sub>min</sub>) / *H*):
+1.08 *V* from an empty buffer, 0.58 *V* from a full one. A node *meets the
+target* when it is known and its safe rate covers that need, judged at *B*
+less a switch's gap for any node but the session's own. Every 2 s, each
+session:
+
+1. stays if its node meets the target (a full read-ahead always does);
+2. else switches to the node that meets it with the highest safe rate;
+3. else takes whichever node, its own included, falls least short;
+4. and once on its node for 5 min, switches for speed alone to a node tested
+   in the last 2 min whose safe rate is 1.5× its own node's rate now.
+
+No byte for 4 s, or a connection error, fails over at once. The primary is
+the node quickest to deliver a page of browsing, four round trips and 3 MB,
+and gives way only to a known node 100 ms quicker, while nothing plays.
 
 Rates are learned from playback alone. Every stream samples its media node,
 and a session tests other nodes beside it: while its media node keeps
 reading, another node reads the stretch just past the read-ahead, up to
 32 MB for up to 8 s, and its bytes are dropped. A node that fails the test
-costs the session nothing. A session that meets its target, with another
-node known to meet it from an empty buffer, tests nothing; as that node's
-belief fades, it stops counting and tests resume. Otherwise each node draws
-once from its rate posterior (Thompson sampling), and a node that out-draws
-the media node is tested, so barely measured nodes that may be fast are
-tried first, known fallbacks stay fresh, and known slow nodes are left
-alone. One test runs at a time, within
-a budget: a session earns `probes.budget` (5%) of its bitrate while it
-plays, whatever its node delivers, so a session stuck on a slow node may
-test as often as any, and tests of slow nodes cost fewer bytes. A test costs
-a second connection, through a second exit IP.
-`embolt replay` runs the model over the logged samples and reports
-how well calibrated it is, to tune `half_life` and `prior_strength` on your
-own data:
+costs the session nothing. Only a node that may be faster is tested: one
+not known, or one typically faster and not sampled for 30 min; of those, the
+one sampled longest ago. One test runs at a time, within a budget: after a
+test, a session waits until it has played 1/`probes.budget` (20×) the test's
+bytes, and at least 30 s. A test costs a second connection, through a
+second exit IP.
+
+### Logs
+
+Every choice is logged at info, as `key=value` text, so `docker compose logs`
+shows the strategy at work:
+
+| Message | When | Says |
+| --- | --- | --- |
+| `playback started` | a session starts | its node, why, and the best options as `node safe/need` (✓ meets, ? not known) |
+| `session` | every 30 s while it stays | buffer, whether the read-ahead filled, rate now, safe rate, need, verdict |
+| `move` | a step decides to switch | `reason` risk or faster, why, the session's safe rate and need, the options |
+| `switched` | a feed reconnects on another node | `reason` risk, faster, stall or error, buffer, rate |
+| `explore` / `explored` | a speed test starts / ends | the node, why it was tested, what it delivered, its typical rate after |
+| `primary switched` | the primary changes | burst times of both |
+| `pinged` | each ping round | nodes, how many answered |
+| `breaker open` | a node faults 3 times | until when |
+| `playback ended` | a session ends | node, failovers, tests, minutes |
 
 ```sh
-docker compose exec embolt embolt replay --samples /data/samples
+docker compose logs embolt | grep -E 'msg="?(move|switched|explore)'
 ```
 
 ## Develop
@@ -89,11 +113,11 @@ task build       # bin/embolt with the pane embedded
 
 | Package | Holds |
 | --- | --- |
-| `cmd/embolt` | `serve`, `replay`, `healthcheck`, `version` |
+| `cmd/embolt` | `serve`, `healthcheck`, `version` |
 | `internal/config` | schema, defaults, validation, hot reload |
 | `internal/nodes` | subscriptions, the mihomo wrapper (only importer of mihomo), transports |
-| `internal/measure` | beliefs, breaker, ping, sample log |
-| `internal/control` | stall risk, roles, switch actions, Thompson-sampled exploration |
+| `internal/measure` | node estimates, breaker, ping |
+| `internal/control` | roles, switch and migration rules, speed tests, decision logs |
 | `internal/proxy` | ingress, classifier, PlaybackInfo, media lane, failover, HLS |
 | `internal/cache` | image and subtitle disk LRU |
 | `internal/view` | secret-free DTOs, source of the TypeScript types |

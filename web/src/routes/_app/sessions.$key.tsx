@@ -1,6 +1,6 @@
 import { Link, createFileRoute } from '@tanstack/react-router'
 import { useLimits, useSession } from '#/api/client'
-import { Badge, Buffer, Dot, Empty, EventList, NodeLink, Panel, PageHeader, Range, Risk, Role, Stat, Stats, Table, Thumb, Ago, itemTitle, mbps, td } from '#/components/ui'
+import { Badge, Buffer, Dot, Empty, EventList, NodeLink, Panel, PageHeader, Range, Headroom, Role, Stat, Stats, Table, Thumb, Ago, itemTitle, mbps, td } from '#/components/ui'
 
 export const Route = createFileRoute('/_app/sessions/$key')({ component: SessionDetail })
 
@@ -63,8 +63,8 @@ function SessionDetail() {
           <Stat label="Live rate" sub={`of ${mbps(s.bitrateMbps)}`}>
             {mbps(s.liveMbps)}
           </Stat>
-          <Stat label="Stall risk">
-            <Risk value={s.stallRisk} target={limits.stallRisk} />
+          <Stat label="Headroom" sub={`${mbps(s.safeMbps)} safe of ${mbps(s.needMbps)}`}>
+            <Headroom safe={s.safeMbps} need={s.needMbps} />
           </Stat>
           <Stat label={d.verdict?.to ? 'Switching to' : 'Staying on'} sub={d.verdict?.reason}>
             <NodeLink {...(d.verdict?.to ?? s.media)} />
@@ -74,7 +74,7 @@ function SessionDetail() {
 
       {s && d.choices.length > 0 && (
         <Panel title="Node choice" flush>
-          <Table head={['Node', 'Gap', 'Stall risk', 'Exp. stall', 'Rate']}>
+          <Table head={['Node', 'Gap', 'Headroom', 'Safe / need', 'Rate']}>
             {d.choices.map((c) => (
               <tr key={c.node.id} className={c.node.id === next ? 'bg-sky-50/70 dark:bg-sky-400/5' : undefined}>
                 <td className={td}>
@@ -85,9 +85,11 @@ function SessionDetail() {
                 </td>
                 <td className={`${td} text-zinc-500`}>{c.role === 'media' ? '—' : `${c.gapSeconds.toFixed(1)} s`}</td>
                 <td className={td}>
-                  <Risk value={c.stallRisk} target={limits.stallRisk} />
+                  <Headroom safe={c.safeMbps} need={c.needMbps} known={c.known} />
                 </td>
-                <td className={td}>{c.stallSeconds.toFixed(1)} s</td>
+                <td className={td}>
+                  {mbps(c.safeMbps)} <span className="text-zinc-500">/ {mbps(c.needMbps)}</span>
+                </td>
                 <td className={td}>
                   <Range e={c.rateMbps} unit="Mbps" />
                 </td>

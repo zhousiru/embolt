@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"time"
 
@@ -49,7 +50,17 @@ func (t test) run(ctx context.Context, play *control.Stream, n *nodes.Node) {
 		t.s.stats.Record(n, measure.Sample{Kind: measure.KindExplore, Err: measure.Redact(err)})
 	}
 	play.Probed(got)
-	slog.Info("explored", "node", n.Name, "mb", got>>20, "err", err)
+	mbps := 0.0
+	if m.totalDur > 0 {
+		mbps = math.Round(float64(m.total)*8/m.totalDur.Seconds()/1e5) / 10
+	}
+	errMsg := ""
+	if err != nil {
+		errMsg = measure.Redact(err)
+	}
+	st := t.s.stats.State(n)
+	slog.Info("explored", "session", play.Key(), "node", n.Name, "mb", got>>20, "mbps", mbps,
+		"node_mbps", math.Round(st.Rate.Typical()*10)/10, "node_known", st.Rate.Known(), "err", errMsg)
 }
 
 // read fetches the stretch until it is done, its time is up, or the node

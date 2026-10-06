@@ -107,7 +107,7 @@ func TestExploreBesideTheMediaNode(t *testing.T) {
 	if f := s.ctrl.Sessions()[0].Failovers; f != 0 {
 		t.Errorf("a test counted %d failovers", f)
 	}
-	recent := s.stats.State(other).Recent
+	recent := s.stats.Recent(other)
 	if len(recent) == 0 || recent[len(recent)-1].Kind != measure.KindExplore || recent[len(recent)-1].Err != "" {
 		t.Errorf("the tested node's samples %+v, want an explore rate", recent)
 	}
@@ -127,11 +127,11 @@ func TestFailedExploreCostsNothing(t *testing.T) {
 	if got := ranges(); len(got) < 2 || got[0] != "bytes=0-" || slices.ContainsFunc(got[1:], func(r string) bool { return r != tested }) {
 		t.Errorf("upstream saw %q, want the media node's read, then only the test %q", got, tested)
 	}
-	recent := s.stats.State(other).Recent
+	recent := s.stats.Recent(other)
 	if len(recent) == 0 || recent[len(recent)-1].Err == "" {
 		t.Errorf("the tested node's samples %+v, want its failure", recent)
 	}
-	for _, smp := range s.stats.State(sp.f.play.Node()).Recent {
+	for _, smp := range s.stats.Recent(sp.f.play.Node()) {
 		if smp.Err != "" {
 			t.Errorf("the test's failure counted against the media node: %+v", smp)
 		}
@@ -188,8 +188,8 @@ func TestFeedsMoveTogether(t *testing.T) {
 	}
 
 	video, audio, side := newFeed(1000), newFeed(400_000), newFeed(800_000)
-	resumeOn(video, switchTo{other}, other)
-	resumeOn(audio, switchTo{other}, other)
+	resumeOn(video, switchTo{other, "risk"}, other)
+	resumeOn(audio, switchTo{other, "risk"}, other)
 	resumeOn(side, errStall, other) // the session already moved: follow it
 	if f := s.ctrl.Sessions()[0].Failovers; f != 1 {
 		t.Errorf("one move of three feeds counted %d failovers, want 1", f)
