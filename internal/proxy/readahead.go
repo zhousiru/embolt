@@ -546,10 +546,10 @@ func (s *Server) Close() {
 }
 
 // serveStatic answers a ranged read of a media file from a shared span,
-// opening one when no span can serve it. A player resuming a read sends
-// If-Range: a span answers it when it holds the version the header names.
-// A request Embolt cannot answer from a span (several ranges, another
-// conditional request, an If-Range for another version) goes to upstream as
+// opening one when no span can serve it. A span checks a request's If-Match
+// and If-Range itself, and answers when it holds the version they name. A
+// request Embolt cannot answer from a span (several ranges, another
+// conditional request, a version the span does not hold) goes to upstream as
 // is.
 func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request, target *url.URL) {
 	key, mbps := s.catalog.session(r)
@@ -559,9 +559,9 @@ func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request, target *url
 		s.passThrough(w, req, key, mbps)
 		return
 	}
-	ifRange := ""
+	want := versions{ifMatch: r.Header.Get("If-Match")}
 	if r.Header.Get("Range") != "" { // without a Range, If-Range is ignored
-		ifRange = r.Header.Get("If-Range")
+		want.ifRange = r.Header.Get("If-Range")
 	}
 	fk := fileKey(key, target, r)
 	for range 2 { // a span that fails to open sends the requests that joined it to open their own
@@ -594,11 +594,11 @@ func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request, target *url
 		} else {
 			ra.mu.Unlock()
 		}
-		switch s.read(w, r, sp, rd, last, ifRange) {
+		switch s.read(w, r, sp, rd, last, want) {
 		case served:
 			return
 		case stale:
-			s.passThrough(w, req, key, mbps) // upstream answers with the whole file
+			s.passThrough(w, req, key, mbps) // upstream answers: 412, or the whole file
 			return
 		}
 	}
@@ -611,12 +611,17 @@ type answer int
 const (
 	served   answer = iota // it wrote a response, or the player left
 	unopened               // sp failed to open; nothing was written
-	stale                  // sp holds another version than the request's If-Range names; nothing was written
+	stale                  // sp holds another version than the request names; nothing was written
 )
 
+// versions are the preconditions on a request a span checks itself: the
+// If-Match that VLC sends on every read once it knows the file's ETag, and
+// the If-Range a player sends resuming a read. Empty means none.
+type versions struct{ ifMatch, ifRange string }
+
 // read waits for sp to open and answers rd's request from it, if sp holds
-// the version ifRange names ("" for any).
-func (s *Server) read(w http.ResponseWriter, r *http.Request, sp *span, rd *reader, last int64, ifRange string) answer {
+// the version the request wants.
+func (s *Server) read(w http.ResponseWriter, r *http.Request, sp *span, rd *reader, last int64, want versions) answer {
 	ra, ctx := s.ra, r.Context()
 	ra.mu.Lock()
 	defer func() {
@@ -631,7 +636,7 @@ func (s *Server) read(w http.ResponseWriter, r *http.Request, sp *span, rd *read
 	if !sp.ready {
 		return unopened
 	}
-	if ifRange != "" && !sp.holds(ifRange) {
+	if !sp.holds(want) {
 		return stale
 	}
 	if rd.pos >= sp.total {
@@ -683,11 +688,17 @@ func (s *Server) read(w http.ResponseWriter, r *http.Request, sp *span, rd *read
 	return served
 }
 
-// holds reports whether sp holds the version of the file an If-Range names:
-// its strong ETag, or its Last-Modified date. Requires ra.mu.
-func (sp *span) holds(ifRange string) bool {
+// holds reports whether sp holds the version of the file a request wants.
+// If-Match names it by "*" or a list of strong ETags; If-Range by its strong
+// ETag or its Last-Modified date (RFC 9110, 13.1). Requires ra.mu.
+func (sp *span) holds(want versions) bool {
 	etag := sp.header.Get("ETag")
-	return ifRange == etag && !strings.HasPrefix(etag, "W/") || ifRange == sp.header.Get("Last-Modified")
+	strong := etag != "" && !strings.HasPrefix(etag, "W/")
+	if want.ifMatch != "" && want.ifMatch != "*" &&
+		!(strong && slices.ContainsFunc(strings.Split(want.ifMatch, ","), func(t string) bool { return strings.TrimSpace(t) == etag })) {
+		return false
+	}
+	return want.ifRange == "" || strong && want.ifRange == etag || want.ifRange == sp.header.Get("Last-Modified")
 }
 
 // woke says why a wait on a span returned.
@@ -783,9 +794,9 @@ func parseRange(v string) (first, last int64, ok bool) {
 }
 
 // conditional reports whether a request carries a precondition other than
-// If-Range, which a span checks itself.
+// If-Match and If-Range, which a span checks itself.
 func conditional(h http.Header) bool {
-	for _, k := range []string{"If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since"} {
+	for _, k := range []string{"If-None-Match", "If-Modified-Since", "If-Unmodified-Since"} {
 		if h.Get(k) != "" {
 			return true
 		}
