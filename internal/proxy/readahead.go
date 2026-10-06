@@ -65,6 +65,7 @@ type file struct {
 
 	play    *control.Stream // set by the first feed, released with the last span
 	bitrate float64         // Mbps
+	fetched int64           // bytes read from upstream by every feed
 	window  int64           // read-ahead of its main read, in bytes
 	stop    context.CancelFunc
 }
@@ -482,6 +483,9 @@ func (f *file) supervise(ctx context.Context) {
 	tick := time.NewTicker(stepEvery)
 	defer tick.Stop()
 	ra := f.ra
+	ra.mu.Lock()
+	fetched, at := f.fetched, time.Now()
+	ra.mu.Unlock()
 	for {
 		select {
 		case <-ctx.Done():
@@ -489,7 +493,10 @@ func (f *file) supervise(ctx context.Context) {
 		case <-tick.C:
 		}
 		ra.mu.Lock()
-		obs, main := f.observe(time.Now())
+		now := time.Now()
+		obs, main := f.observe(now)
+		obs.Fetched = float64(f.fetched-fetched) * 8 / now.Sub(at).Seconds() / 1e6
+		fetched, at = f.fetched, now
 		var feeds []*feed
 		for _, sp := range f.spans {
 			if sp.feed != nil && sp.ready {

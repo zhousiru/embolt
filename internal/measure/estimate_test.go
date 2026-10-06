@@ -20,7 +20,7 @@ func TestEstimateLearns(t *testing.T) {
 	if sd := math.Sqrt(e.Var); math.Abs(sd-0.2) > 0.03 {
 		t.Errorf("spread %.3f, want ≈ 0.2", sd)
 	}
-	if lo := e.Low(); math.Abs(lo-50*math.Exp(-0.2)) > 3 {
+	if lo := e.Low(); math.Abs(lo-50*math.Exp(-0.2)) > 1 {
 		t.Errorf("low %.1f Mbps, want ≈ %.1f", lo, 50*math.Exp(-0.2))
 	}
 }
@@ -35,8 +35,27 @@ func TestFadeKeepsValues(t *testing.T) {
 	if math.Abs(later.Weight-e.Weight/2) > 1e-9 || later.Mean != e.Mean || later.Var != e.Var {
 		t.Errorf("after one half-life %+v, from %+v: want only the weight halved", later, e)
 	}
-	if !e.Known() || e.AsOf(t0.Add(3*time.Hour), time.Hour).Known() {
-		t.Error("10 samples should be known now, and not 3 half-lives on")
+}
+
+// TestDoubt: a mean on little or old evidence is doubted, never trusted
+// outright: one sample of a steady rate is not as safe as many, and fading
+// lowers it further.
+func TestDoubt(t *testing.T) {
+	t0 := time.Unix(0, 0)
+	var one, many Estimate
+	one.Observe(math.Log(100), t0, time.Hour)
+	for range 100 {
+		many.Observe(math.Log(100), t0, time.Hour)
+	}
+	old := many.AsOf(t0.Add(8*time.Hour), time.Hour)
+	if !(one.Low() < many.Low() && old.Low() < many.Low() && many.Low() > 95) {
+		t.Errorf("low: one sample %.1f, many %.1f, many 8 half-lives on %.1f", one.Low(), many.Low(), old.Low())
+	}
+	if !(one.Upside() > many.Upside() && old.Upside() > many.Upside() && many.Upside() < 106) {
+		t.Errorf("upside: one sample %.1f, many %.1f, many 8 half-lives on %.1f", one.Upside(), many.Upside(), old.Upside())
+	}
+	if none := (Estimate{}); none.Low() != 0 || !math.IsInf(none.Upside(), 1) {
+		t.Errorf("no evidence: low %.1f, upside %.1f; want 0 and +Inf", none.Low(), none.Upside())
 	}
 }
 

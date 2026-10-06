@@ -16,17 +16,17 @@ import (
 func TestBest(t *testing.T) {
 	a, b := &nodes.Node{Name: "a"}, &nodes.Node{Name: "b"}
 	byName := func(x, y option) int { return strings.Compare(x.n.Name, y.n.Name) }
-	if o, ok := best([]option{{n: b, known: true, safe: 30, need: 20}, {n: a, known: true, safe: 25, need: 20}}, byName); o.n != a || !ok {
+	if o, ok := best([]option{{n: b, safe: 30, need: 20}, {n: a, safe: 25, need: 20}}, byName); o.n != a || !ok {
 		t.Errorf("both pass: picked %v (meets %v), want a by preference", o.n, ok)
 	}
-	if o, ok := best([]option{{n: a, known: true, safe: 10, need: 20}, {n: b, known: true, safe: 21, need: 20}}, byName); o.n != b || !ok {
+	if o, ok := best([]option{{n: a, safe: 10, need: 20}, {n: b, safe: 21, need: 20}}, byName); o.n != b || !ok {
 		t.Errorf("only b passes: picked %v (meets %v), want b", o.n, ok)
 	}
-	if o, ok := best([]option{{n: a, known: true, safe: 10, need: 20}, {n: b, known: true, safe: 15, need: 21}}, byName); o.n != b || ok {
+	if o, ok := best([]option{{n: a, safe: 10, need: 20}, {n: b, safe: 15, need: 21}}, byName); o.n != b || ok {
 		t.Errorf("none passes: picked %v (meets %v), want b, the least short", o.n, ok)
 	}
-	if o, ok := best([]option{{n: a, safe: 90, need: 20}}, byName); ok {
-		t.Errorf("a node not known: picked %v as meeting the target", o.n)
+	if o, ok := best([]option{{n: a, safe: 0, need: -5}}, byName); ok {
+		t.Errorf("a node never measured: picked %v as meeting the target", o.n)
 	}
 	if o, _ := best(nil, byName); o.n != nil {
 		t.Errorf("no options: picked %v", o.n)
@@ -191,26 +191,43 @@ func TestPrimaryMovesOnlyWhenSureAndIdle(t *testing.T) {
 	}
 }
 
-// TestSessionShowsTheStepsChoice: the session view must judge nodes as Step
-// does, and say why it stays or moves.
-func TestSessionShowsTheStepsChoice(t *testing.T) {
+// TestSessionShowsItsSteps: the session view shows the last step, keeps the
+// steps for the chart, and outlives the session once it ends.
+func TestSessionShowsItsSteps(t *testing.T) {
+	const stepGap = 2 * time.Second
 	c, n := testController(t, map[string][]float64{"a": cycle(20, 517, 571, 353, 692), "b": cycle(20, 110, 120, 95, 130)})
 	s, _ := c.Play("tv/1", 22.2)
-	s.Step(Observation{Full: true})
-	d := c.Session("tv/1")
-	if d.Session == nil || d.Verdict == nil || d.Verdict.To != nil || d.Verdict.Reason != "read-ahead full" {
-		t.Fatalf("full read-ahead: verdict %+v, want stay", d.Verdict)
+	if st := c.Session("tv/1").Session.State; st != "starting" {
+		t.Errorf("before a step: state %q, want starting", st)
 	}
-	if len(d.Choices) != 2 || d.Choices[0].Node.ID != n["a"].ID || d.Choices[0].Role != "media" || d.Choices[1].GapSeconds <= 0 {
-		t.Fatalf("choices %+v, want a staying, then b with a gap", d.Choices)
+	s.Step(Observation{ReadAhead: 30 * time.Second, Full: true, Fetched: 40})
+	d := c.Session("tv/1")
+	if d.Session.State != "ok" || d.Session.FetchedMbps != 40 || len(d.History) != 1 || d.History[0].Buffer != 30 {
+		t.Fatalf("full read-ahead: %+v, history %+v", d.Session, d.History)
 	}
 
 	record(c.stats, n["a"], 0, 2.5, 5.8)
-	obs := Observation{Delivered: 2 * time.Second, Elapsed: 6 * time.Second}
-	s.Step(obs)
-	d = c.Session("tv/1")
-	if d.Verdict.To == nil || d.Verdict.To.ID != n["b"].ID {
-		t.Errorf("starving: verdict %+v, want a switch to b", d.Verdict)
+	s.Step(Observation{ReadAhead: 20 * time.Second})
+	if st := c.Session("tv/1").Session.State; st != "risk" {
+		t.Errorf("a starving node: state %q, want risk", st)
+	}
+	c.plays["tv/1"].stepped = time.Now().Add(-stepGap)
+	s.Step(Observation{})
+	if d := c.Session("tv/1"); d.Session.State != "low" || d.Session.LowSeconds < stepGap.Seconds() || len(d.History) != 3 {
+		t.Errorf("an empty buffer: %+v, want low", d.Session)
+	}
+
+	s.Release()
+	if st := c.Session("tv/1").Session.State; st != "idle" {
+		t.Errorf("no stream: state %q, want idle", st)
+	}
+	c.plays["tv/1"].idle = time.Now().Add(-playLinger - time.Second)
+	c.expire()
+	if r := c.Recent(); len(r) != 1 || r[0].Key != "tv/1" || r[0].State != "ended" || r[0].Ended.IsZero() {
+		t.Fatalf("recent %+v, want tv/1 ended", r)
+	}
+	if d := c.Session("tv/1"); d.Session == nil || d.Session.State != "ended" || len(d.History) != 3 {
+		t.Errorf("an ended session: %+v", d)
 	}
 	if c.Session("tv/2").Session != nil {
 		t.Error("an unknown session has a view")
@@ -312,9 +329,10 @@ func TestExploreWithinBudget(t *testing.T) {
 	}
 }
 
-// TestExploreWhatMayBeFaster: a node not known is tested, and a node known
-// to be faster once it has not been sampled for retestAfter; a node known
-// to be slower, or faster and sampled lately, is not.
+// TestExploreWhatMayBeFaster: a node never measured is tested, and one that
+// may be faster, given its evidence, once it has not been sampled for
+// retestAfter; a node shown slower, or sampled lately, is not, until its
+// evidence fades.
 func TestExploreWhatMayBeFaster(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -322,10 +340,12 @@ func TestExploreWhatMayBeFaster(t *testing.T) {
 		mbps  []float64
 		tests bool
 	}{
-		{"not known", time.Hour, []float64{60}, true},
+		{"never measured", 0, nil, true},
+		{"measured once", time.Hour, []float64{60}, true},
 		{"faster, sampled long ago", time.Hour, cycle(40, 100), true},
 		{"faster, sampled lately", 10 * time.Minute, cycle(40, 100), false},
 		{"slower", time.Hour, cycle(40, 3), false},
+		{"slower, measured once a day ago", 24 * time.Hour, []float64{20}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, n := testController(t, nil)

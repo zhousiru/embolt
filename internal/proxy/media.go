@@ -268,6 +268,7 @@ func (fd *feed) pump(a *attempt) error {
 		if n > 0 {
 			ra.mu.Lock()
 			kept := fd.sp.append(buf[:n])
+			fd.sp.f.fetched += int64(n)
 			ra.mu.Unlock()
 			if !kept {
 				return context.Canceled

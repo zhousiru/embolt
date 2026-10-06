@@ -10,10 +10,9 @@ var (
 	nodeRTT     = prometheus.NewDesc("embolt_node_rtt_ms", "Typical RTT to the Emby server.", []string{"node"}, nil)
 	nodeRate    = prometheus.NewDesc("embolt_node_rate_mbps", "Typical rate from the Emby server.", []string{"node"}, nil)
 	nodeOpen    = prometheus.NewDesc("embolt_node_breaker_open", "1 while the node's breaker is open.", []string{"node"}, nil)
-	sessSafe    = prometheus.NewDesc("embolt_session_safe_mbps", "Rate the session's media node keeps to most of the time.", []string{"session"}, nil)
-	sessNeed    = prometheus.NewDesc("embolt_session_need_mbps", "Rate the session needs over the horizon at its buffer.", []string{"session"}, nil)
-	sessBuffer  = prometheus.NewDesc("embolt_session_buffer_seconds", "Seconds of media in the session's read-ahead.", []string{"session"}, nil)
-	descriptors = []*prometheus.Desc{nodeRTT, nodeRate, nodeOpen, sessSafe, sessNeed, sessBuffer}
+	sessFetched = prometheus.NewDesc("embolt_session_fetched_mbps", "Rate the session read from upstream over its last step.", []string{"session"}, nil)
+	sessBuffer  = prometheus.NewDesc("embolt_session_buffer_seconds", "Seconds of media buffered ahead of the session's player.", []string{"session"}, nil)
+	descriptors = []*prometheus.Desc{nodeRTT, nodeRate, nodeOpen, sessFetched, sessBuffer}
 )
 
 // collector reads gauges from the controller at scrape time.
@@ -39,8 +38,7 @@ func (c collector) Collect(ch chan<- prometheus.Metric) {
 		gauge(nodeOpen, open, n.Name)
 	}
 	for _, s := range c.ctrl.Sessions() {
-		gauge(sessSafe, s.SafeMbps, s.Key)
-		gauge(sessNeed, s.NeedMbps, s.Key)
+		gauge(sessFetched, s.FetchedMbps, s.Key)
 		gauge(sessBuffer, s.BufferSeconds, s.Key)
 	}
 }

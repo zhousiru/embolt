@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	primaryMargin = 100.0 // ms a known node's burst must be quicker by to take the primary, see burstMs
+	primaryMargin = 100.0 // ms another node's burst must be quicker by to take the primary, see burstMs
 	activeWindow  = 10 * time.Minute
 	playLinger    = 2 * time.Minute // keeps a session's nodes across seeks
 	firstRunMbps  = 40.0            // the bitrate to judge at before any session reports one
@@ -46,9 +46,10 @@ type Controller struct {
 	mu      sync.Mutex
 	primary *nodes.Node
 	plays   map[string]*Playback
-	refused time.Time // exploration paused until
-	probing bool      // a test is running
-	peak    float64   // highest bitrate played within peakMemory
+	refused time.Time   // exploration paused until
+	testing *nodes.Node // under a speed test, nil if none
+	ended   []ended     // newest last, within keepEnded
+	peak    float64     // highest bitrate played within peakMemory
 	peakAt  time.Time
 }
 
@@ -144,8 +145,7 @@ func (c *Controller) setPrimary(n *nodes.Node) {
 }
 
 // reconsiderPrimary runs after each ping round. Another node takes over only
-// when nothing is playing, its RTT is known, and its burst is primaryMargin
-// quicker.
+// when nothing is playing and its burst is primaryMargin quicker.
 func (c *Controller) reconsiderPrimary() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -153,7 +153,7 @@ func (c *Controller) reconsiderPrimary() {
 		c.setPrimary(c.quickest(c.usable(nil)))
 		return
 	}
-	best := c.quickest(c.usable(func(n *nodes.Node) bool { return n != c.primary && c.stats.State(n).RTT.Known() }))
+	best := c.quickest(c.usable(func(n *nodes.Node) bool { return n != c.primary }))
 	if best != nil && !c.playing() && c.burst(best)+primaryMargin < c.burst(c.primary) {
 		c.setPrimary(best)
 	}
@@ -209,6 +209,7 @@ func (c *Controller) expire() {
 	for key, p := range c.plays {
 		if len(p.streams) == 0 && time.Since(p.idle) > playLinger {
 			delete(c.plays, key)
+			c.end(p)
 			slog.Info("playback ended", "session", key, "media", p.node.Name, "failovers", p.failovers,
 				"tests", p.tests, "minutes", round1(p.idle.Sub(p.started).Minutes()))
 		}

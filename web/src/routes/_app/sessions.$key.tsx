@@ -1,6 +1,7 @@
 import { Link, createFileRoute } from '@tanstack/react-router'
 import { useLimits, useSession } from '#/api/client'
-import { Badge, Buffer, Dot, Empty, EventList, NodeLink, Panel, PageHeader, Range, Headroom, Role, Stat, Stats, Table, Thumb, Ago, itemTitle, mbps, td } from '#/components/ui'
+import { ChartKey, SessionChart } from '#/components/chart'
+import { Dot, Empty, EventList, NodeLink, Panel, PageHeader, State, Stat, Stats, Thumb, duration, itemTitle, length, mbps } from '#/components/ui'
 
 export const Route = createFileRoute('/_app/sessions/$key')({ component: SessionDetail })
 
@@ -12,7 +13,6 @@ function SessionDetail() {
   if (!d) return null
   const s = d.session
   const name = s ? itemTitle(s) : { title: key }
-  const next = d.verdict?.to?.id ?? s?.media.id
 
   return (
     <div className="space-y-6">
@@ -25,77 +25,50 @@ function SessionDetail() {
         media={s?.item?.image && <Thumb item={s.item} className="h-20" />}
         title={name.title}
         meta={
-          s ? (
-            <>
-              {name.detail && (
-                <>
-                  <span className="text-zinc-700 dark:text-zinc-300">{name.detail}</span>
-                  <Dot />
-                </>
-              )}
-              <span>{mbps(s.bitrateMbps)}</span>
-              <Dot />
-              <Ago iso={s.started} />
-              <Dot />
-              <span>
-                {s.failovers} failover{s.failovers === 1 ? '' : 's'}
-              </span>
-              {s.streams === 0 && (
-                <>
-                  <Dot />
-                  <Badge>idle</Badge>
-                </>
-              )}
-            </>
-          ) : (
-            <Badge>ended</Badge>
-          )
+          <>
+            {name.detail && (
+              <>
+                <span className="text-zinc-700 dark:text-zinc-300">{name.detail}</span>
+                <Dot />
+              </>
+            )}
+            {s && <span>{mbps(s.bitrateMbps, 0)}</span>}
+            <span className="ml-2">
+              <State state={s?.state ?? 'ended'} />
+            </span>
+          </>
         }
       />
 
       {s && (
         <Stats>
-          <Stat label="Read-ahead">
-            <div className="pt-1.5">
-              <Buffer seconds={s.bufferSeconds} limits={limits} />
-            </div>
+          {s.ended ? (
+            <Stat label="Length">{length(s)}</Stat>
+          ) : (
+            <Stat label="Buffer">{s.bufferSeconds.toFixed(0)} s</Stat>
+          )}
+          {!s.ended && (
+            <Stat label="Fetched">
+              {s.fetchedMbps.toFixed(1)}
+              <span className="text-zinc-400"> / {mbps(s.bitrateMbps, 0)}</span>
+            </Stat>
+          )}
+          <Stat label="Node" sub={s.nodeMbps > 0 ? `${mbps(s.nodeMbps, 0)} typical` : undefined}>
+            <NodeLink {...s.media} />
           </Stat>
-          <Stat label="Live rate" sub={`of ${mbps(s.bitrateMbps)}`}>
-            {mbps(s.liveMbps)}
-          </Stat>
-          <Stat label="Headroom" sub={`${mbps(s.safeMbps)} safe of ${mbps(s.needMbps)}`}>
-            <Headroom safe={s.safeMbps} need={s.needMbps} />
-          </Stat>
-          <Stat label={d.verdict?.to ? 'Switching to' : 'Staying on'} sub={d.verdict?.reason}>
-            <NodeLink {...(d.verdict?.to ?? s.media)} />
+          <Stat label="Failovers">{s.failovers}</Stat>
+          <Stat label="Low buffer">
+            {s.lowSeconds >= 1 ? <span className="text-rose-600 dark:text-rose-400">{duration(s.lowSeconds)}</span> : '—'}
           </Stat>
         </Stats>
       )}
 
-      {s && d.choices.length > 0 && (
-        <Panel title="Node choice" flush>
-          <Table head={['Node', 'Gap', 'Headroom', 'Safe / need', 'Rate']}>
-            {d.choices.map((c) => (
-              <tr key={c.node.id} className={c.node.id === next ? 'bg-sky-50/70 dark:bg-sky-400/5' : undefined}>
-                <td className={td}>
-                  <div className="flex items-center gap-2">
-                    <NodeLink {...c.node} className="font-medium" />
-                    {c.role && <Role role={c.role} />}
-                  </div>
-                </td>
-                <td className={`${td} text-zinc-500`}>{c.role === 'media' ? '—' : `${c.gapSeconds.toFixed(1)} s`}</td>
-                <td className={td}>
-                  <Headroom safe={c.safeMbps} need={c.needMbps} known={c.known} />
-                </td>
-                <td className={td}>
-                  {mbps(c.safeMbps)} <span className="text-zinc-500">/ {mbps(c.needMbps)}</span>
-                </td>
-                <td className={td}>
-                  <Range e={c.rateMbps} unit="Mbps" />
-                </td>
-              </tr>
-            ))}
-          </Table>
+      {s && (
+        <Panel title={s.ended ? 'Last 10 minutes played' : 'Last 10 minutes'}>
+          <SessionChart history={d.history} events={d.events} limits={limits} bitrate={s.bitrateMbps} />
+          <div className="mt-4">
+            <ChartKey />
+          </div>
         </Panel>
       )}
 

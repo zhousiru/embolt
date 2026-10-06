@@ -11,70 +11,109 @@ import (
 	"github.com/zhousiru/embolt/internal/view"
 )
 
-// Sessions lists live playbacks.
+// keepEnded is how long the pane shows a session after it ends, and
+// maxEnded how many.
+const (
+	keepEnded = 24 * time.Hour
+	maxEnded  = 50
+)
+
+// ended is a session the controller has let go, kept for the pane.
+type ended struct {
+	view    view.Session
+	history []view.Point
+}
+
+// Sessions lists the sessions playing, oldest first.
 func (c *Controller) Sessions() []view.Session {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	out := []view.Session{}
 	for _, p := range c.plays {
-		out = append(out, sessionView(p))
+		out = append(out, c.sessionView(p))
 	}
 	slices.SortFunc(out, func(a, b view.Session) int { return a.Started.Compare(b.Started) })
 	return out
 }
 
-func sessionView(p *Playback) view.Session {
-	return view.Session{
+// Recent lists the sessions ended within keepEnded, newest first.
+func (c *Controller) Recent() []view.Session {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := []view.Session{}
+	for _, e := range slices.Backward(c.ended) {
+		if time.Since(e.view.Ended) < keepEnded {
+			out = append(out, e.view)
+		}
+	}
+	return out
+}
+
+// Session shows a session, playing or ended, with its recent steps.
+func (c *Controller) Session(key string) view.SessionDetail {
+	d := view.SessionDetail{History: []view.Point{}, Events: []view.Event{}}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if p := c.plays[key]; p != nil {
+		v := c.sessionView(p)
+		d.Session, d.History = &v, slices.Clone(p.history)
+		return d
+	}
+	for _, e := range slices.Backward(c.ended) {
+		if e.view.Key == key {
+			v := e.view
+			d.Session, d.History = &v, slices.Clone(e.history)
+			break
+		}
+	}
+	return d
+}
+
+// sessionView is p as of its last step. Caller holds c.mu.
+func (c *Controller) sessionView(p *Playback) view.Session {
+	state := cmp.Or(p.state, "starting")
+	if len(p.streams) == 0 {
+		state = "idle"
+	}
+	v := view.Session{
 		Key:           p.key,
+		State:         state,
 		Media:         ref(p.node),
-		Streams:       p.viewers,
+		Players:       p.viewers,
 		BitrateMbps:   p.bitrate,
 		BufferSeconds: p.buffer.Seconds(),
-		LiveMbps:      p.live,
-		SafeMbps:      p.safe,
-		NeedMbps:      p.need,
+		FetchedMbps:   p.fetched,
 		Failovers:     p.failovers,
+		Tests:         p.tests,
+		LowSeconds:    p.low.Seconds(),
 		Started:       p.started,
+	}
+	if r := c.stats.State(p.node).Rate; r.Measured() {
+		v.NodeMbps = r.Typical()
+	}
+	return v
+}
+
+// end keeps p for the pane once it is let go. Caller holds c.mu.
+func (c *Controller) end(p *Playback) {
+	v := c.sessionView(p)
+	v.State, v.Ended, v.Players, v.FetchedMbps = "ended", p.idle, 0, 0
+	c.ended = append(c.ended, ended{view: v, history: p.history})
+	if len(c.ended) > maxEnded {
+		c.ended = slices.Delete(c.ended, 0, len(c.ended)-maxEnded)
 	}
 }
 
-// Session shows a live session and the choice its next step faces: every
-// usable node judged at the session's buffer and bitrate, as Step judges
-// them.
-func (c *Controller) Session(key string) view.SessionDetail {
-	d := view.SessionDetail{Choices: []view.Choice{}, Events: []view.Event{}}
+// Testing is the node under a speed test, if any, and until when tests are
+// paused after the server refused one.
+func (c *Controller) Testing() (*view.NodeRef, time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	p := c.plays[key]
-	if p == nil {
-		return d
+	paused := time.Time{}
+	if time.Now().Before(c.refused) {
+		paused = c.refused
 	}
-	now := time.Now()
-	sv := sessionView(p)
-	d.Session = &sv
-	v := c.decide(p, now)
-	d.Verdict = &view.Verdict{To: refPtr(v.to), Reason: v.why}
-	moves := v.moves
-	if moves == nil {
-		moves = c.moves(p, now)
-	}
-	slices.SortFunc(moves, func(a, b option) int { return cmp.Or(cmp.Compare(btoi(!a.meets()), btoi(!b.meets())), bySafe(a, b)) })
-	for i, o := range append([]option{v.stay}, moves...) {
-		role := ""
-		if i == 0 {
-			role = "media"
-		}
-		d.Choices = append(d.Choices, view.Choice{
-			Node:       ref(o.n),
-			Role:       role,
-			GapSeconds: o.gap.Seconds(),
-			Known:      o.known,
-			SafeMbps:   o.safe,
-			NeedMbps:   max(0, o.need),
-			RateMbps:   estimate(o.rate),
-		})
-	}
-	return d
+	return refPtr(c.testing), paused
 }
 
 // PrimaryRef is the current primary, if any, without electing one.
@@ -159,6 +198,7 @@ func (c *Controller) nodeView(n *nodes.Node, roles []string) view.Node {
 		Provider:    n.Provider,
 		RTTMs:       estimate(st.RTT),
 		RateMbps:    estimate(st.Rate),
+		Sampled:     st.Rate.At,
 		BreakerOpen: st.Open(now),
 		Roles:       append([]string{}, roles...),
 	}

@@ -64,30 +64,21 @@ export function Badge({ tone = 'neutral', title, children }: { tone?: keyof type
 
 export const Role = ({ role }: { role: string }) => <Badge tone="accent">{role}</Badge>
 
-/**
- * Headroom: a node's safe rate over what the session needs. It meets the
- * target at 1× or more, when known; a node not known shows "?".
- */
-export function Headroom({ safe, need, known = true }: { safe: number; need: number; known?: boolean }) {
-  const title = `${mbps(safe)} safe, ${mbps(need)} needed`
-  if (!known) {
-    return (
-      <Badge tone="neutral" title={`${title}; not known`}>
-        ?
-      </Badge>
-    )
-  }
-  if (need <= 0) {
-    return (
-      <Badge tone="good" title={title}>
-        ok
-      </Badge>
-    )
-  }
-  const x = safe / need
+const states: Record<string, { label: string; tone: keyof typeof tones; title: string }> = {
+  starting: { label: 'Starting', tone: 'accent', title: 'Filling the buffer for the first time' },
+  ok: { label: 'Smooth', tone: 'good', title: 'Its node keeps the buffer up' },
+  risk: { label: 'At risk', tone: 'warn', title: 'Its node may not keep the buffer up' },
+  low: { label: 'Low buffer', tone: 'bad', title: 'Under the low mark: the player may stall' },
+  idle: { label: 'Idle', tone: 'neutral', title: 'No stream open' },
+  ended: { label: 'Ended', tone: 'neutral', title: '' },
+}
+
+/** A session's state as of its last step. */
+export function State({ state }: { state: string }) {
+  const st = states[state] ?? { label: state, tone: 'neutral', title: '' }
   return (
-    <Badge tone={x >= 1 ? 'good' : x >= 0.8 ? 'warn' : 'bad'} title={title}>
-      {x.toFixed(1)}×
+    <Badge tone={st.tone} title={st.title || undefined}>
+      {st.label}
     </Badge>
   )
 }
@@ -106,7 +97,25 @@ export function Range({ e, unit, digits = 0 }: { e: Estimate; unit: string; digi
   )
 }
 
-/** Read-ahead in seconds against its full length, with the low mark. */
+/** A rate's typical value, with its 90% range drawn on a scale shared by its column. */
+export function RateBar({ e, scale }: { e: Estimate; scale: number }) {
+  if (!e.measured) return <span className="text-zinc-400 dark:text-zinc-600">—</span>
+  const pct = (x: number) => `${Math.min(x / scale, 1) * 100}%`
+  return (
+    <div className="flex items-center gap-3" title={`90% of samples ${e.low.toFixed(0)}–${e.high.toFixed(0)} Mbps`}>
+      <span className="w-20 shrink-0 tabular-nums">
+        {e.mean.toFixed(0)}
+        <span className="ml-1 text-xs text-zinc-500">Mbps</span>
+      </span>
+      <div className="relative h-1.5 w-full min-w-24 rounded-full bg-zinc-100 dark:bg-zinc-800">
+        <div className="absolute inset-y-0 rounded-full bg-sky-500/30" style={{ left: pct(e.low), width: `calc(${pct(e.high)} - ${pct(e.low)})` }} />
+        <div className="absolute -inset-y-0.5 w-0.5 rounded-full bg-sky-500" style={{ left: pct(e.mean) }} />
+      </div>
+    </div>
+  )
+}
+
+/** Seconds buffered against the read-ahead's length, with the low mark. */
 export function Buffer({ seconds, limits }: { seconds: number; limits: Limits }) {
   const max = limits.readAheadSeconds
   const low = limits.bufferMinSeconds
@@ -211,16 +220,22 @@ export function Thumb({ item, className = 'h-10' }: { item?: Item; className?: s
   )
 }
 
-/** A session's thumbnail and title, linked to its page; children go on the line below. */
-export function SessionName({ s, children }: { s: Session; children?: ReactNode }) {
+/** A session's thumbnail and title, linked to its page unless link is false; children go on the line below. */
+export function SessionName({ s, link = true, children }: { s: Session; link?: boolean; children?: ReactNode }) {
   const { title, detail } = itemTitle(s)
   return (
     <div className="flex min-w-0 items-center gap-3">
       <Thumb item={s.item} />
       <div className="min-w-0">
-        <Link to="/sessions/$key" params={{ key: s.key }} title={s.key} className="block truncate font-medium hover:underline">
-          {title}
-        </Link>
+        {link ? (
+          <Link to="/sessions/$key" params={{ key: s.key }} title={s.key} className="block truncate font-medium hover:underline">
+            {title}
+          </Link>
+        ) : (
+          <div title={s.key} className="truncate font-medium">
+            {title}
+          </div>
+        )}
         {(detail || children) && (
           <div className="truncate text-xs text-zinc-500">
             {detail}
@@ -263,6 +278,18 @@ export const Dot = () => (
 
 
 export const mbps = (x: number, digits = 1) => `${x.toFixed(digits)} Mbps`
+
+/** A span of seconds, rounded to what matters: 42 s, 38 min, 1 h 52 min. */
+export function duration(seconds: number) {
+  const s = Math.round(seconds)
+  if (s < 60) return `${s} s`
+  const m = Math.round(s / 60)
+  if (m < 60) return `${m} min`
+  return m % 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m / 60} h`
+}
+
+/** How long a session has run, or ran. */
+export const length = (s: Session) => duration(((s.ended ? Date.parse(s.ended) : Date.now()) - Date.parse(s.started)) / 1000)
 
 export const clock = (iso: string) => new Date(iso).toLocaleTimeString([], { hour12: false })
 

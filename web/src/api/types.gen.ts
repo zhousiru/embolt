@@ -15,7 +15,11 @@ export interface Status {
   primary?: NodeRef;
   nodes: number /* int */;
   usable: number /* int */; // breaker closed
-  sessions: Session[];
+  measured: number /* int */; // usable, with a rate measured
+  testing?: NodeRef;
+  testsPaused?: string; // until, after the server refused a test
+  sessions: Session[]; // playing, oldest first
+  recent: Session[]; // ended within a day, newest first
   limits: Limits;
 }
 /**
@@ -29,17 +33,23 @@ export interface NodeRef {
   id: string;
   name: string;
 }
+/**
+ * Session is one playback as of its controller's last step, or as it ended.
+ */
 export interface Session {
   key: string;
+  state: string; // starting, ok, risk, low, idle or ended
   media: NodeRef;
-  streams: number /* int */; // open player connections
+  players: number /* int */; // open player connections
   bitrateMbps: number /* float64 */;
-  bufferSeconds: number /* float64 */;
-  liveMbps: number /* float64 */;
-  safeMbps: number /* float64 */; // what its media node keeps to, see Choice
-  needMbps: number /* float64 */; // what it needs over the horizon at its buffer
+  bufferSeconds: number /* float64 */; // read-ahead plus a lower bound on the player's own
+  fetchedMbps: number /* float64 */; // read from upstream over the last step
+  nodeMbps: number /* float64 */; // the media node's typical rate, 0 if not measured
   failovers: number /* int */;
+  tests: number /* int */;
+  lowSeconds: number /* float64 */; // under the low mark, once first over it
   started: string;
+  ended?: string;
   item?: Item; // unknown until a player fetches the item's details
 }
 /**
@@ -57,35 +67,21 @@ export interface Item {
   image: boolean; // served at /api/v1/items/{id}/image
 }
 /**
- * SessionDetail is a session and the choice its next step faces. Once the
- * session ends, only its events remain.
+ * SessionDetail is a session with its recent steps. Once the session has
+ * been forgotten, only its events remain.
  */
 export interface SessionDetail {
   session?: Session;
-  verdict?: Verdict;
-  choices: Choice[]; // staying first, then moves from best
+  history: Point[]; // oldest first, up to 10 min
   events: Event[];
 }
 /**
- * Verdict is what the next step does: stay, or switch To.
+ * Point is one step of a session.
  */
-export interface Verdict {
-  to?: NodeRef;
-  reason: string;
-}
-/**
- * Choice is one node as the session's step judges it: staying on the media
- * node, or switching to another, which delivers nothing for its gap. It
- * meets the target when it is known and SafeMbps covers NeedMbps.
- */
-export interface Choice {
-  node: NodeRef;
-  role: string; // media or ""
-  gapSeconds: number /* float64 */;
-  known: boolean; // enough recent samples to trust
-  safeMbps: number /* float64 */; // its rate now, one spread under the typical
-  needMbps: number /* float64 */; // to keep the buffer over its low mark, after the gap
-  rateMbps: Estimate; // as judged: the media node's includes the stream's samples
+export interface Point {
+  at: string;
+  buffer: number /* float64 */; // s
+  mbps: number /* float64 */; // fetched
 }
 /**
  * Estimate summarizes a node's measurements: their typical value and the
@@ -106,6 +102,7 @@ export interface Node {
   provider: string;
   rttMs: Estimate;
   rateMbps: Estimate;
+  sampled?: string; // its last rate sample
   breakerOpen: boolean;
   openUntil?: string;
   roles: string[]; // primary, media, pinned

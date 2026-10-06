@@ -8,13 +8,16 @@ import (
 	"time"
 )
 
-// minKnown is the evidence, in samples, that makes an estimate trusted.
-const minKnown = 3
+// doubt is the spread of a mean that rests on one sample, in log units: the
+// mean's own spread is doubt/√weight. It keeps a mean that rests on a few
+// samples, or on old ones, from passing for a sure one.
+const doubt = 0.5
 
 // Estimate is a running mean and spread of log values whose evidence halves
 // every half-life: an exponentially weighted mean and variance, and the
 // weight of the samples behind them. A node left alone keeps its mean but
-// loses weight until it is no longer known, and is tested again.
+// loses weight, so its mean is doubted more and more, until it is tested
+// again.
 type Estimate struct {
 	Mean   float64   `json:"mean"`   // of the log values
 	Var    float64   `json:"var"`    // of one value around the mean
@@ -41,9 +44,6 @@ func (e Estimate) AsOf(now time.Time, halfLife time.Duration) Estimate {
 	return e
 }
 
-// Known reports whether enough recent samples back the estimate.
-func (e Estimate) Known() bool { return e.Weight >= minKnown }
-
 // Measured reports whether the estimate holds any sample.
 func (e Estimate) Measured() bool { return !e.At.IsZero() }
 
@@ -51,13 +51,26 @@ func (e Estimate) Measured() bool { return !e.At.IsZero() }
 func (e Estimate) Typical() float64 { return math.Exp(e.Mean) }
 
 // Low is a cautious value, one spread under the typical: what a rate keeps
-// to most of the time. It is 0 with no samples.
+// to most of the time. The spread counts the mean's own doubt, so a value
+// that rests on little evidence is low too. It is 0 with no evidence.
 func (e Estimate) Low() float64 {
-	if !e.Measured() {
+	if e.Weight <= 0 {
 		return 0
 	}
-	return math.Exp(e.Mean - math.Sqrt(e.Var))
+	return math.Exp(e.Mean - e.spread())
 }
+
+// Upside is the typical value were the mean one doubt too low: how high it
+// may be, given the evidence. It is +Inf with none.
+func (e Estimate) Upside() float64 {
+	if e.Weight <= 0 {
+		return math.Inf(1)
+	}
+	return math.Exp(e.Mean + doubt/math.Sqrt(e.Weight))
+}
+
+// spread is one value's spread around the mean, plus the mean's own doubt.
+func (e Estimate) spread() float64 { return math.Sqrt(e.Var + doubt*doubt/e.Weight) }
 
 // Range is the 90% range of one sample on the linear scale.
 func (e Estimate) Range() (lo, hi float64) {

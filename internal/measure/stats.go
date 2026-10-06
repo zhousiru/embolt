@@ -59,6 +59,7 @@ func (s Sample) Mbps() float64 {
 // the next minutes: the typical rate worth one sample, pooled with its
 // samples of the last minute or so. A node seen sagging half a minute ago is
 // judged by the sag; one that sagged minutes ago by its typical rate again.
+// Now rests on Rate's evidence, so it is doubted as much.
 type State struct {
 	RTT, Rate Estimate
 	Now       Estimate
@@ -139,10 +140,12 @@ func (s *Stats) StateAt(n *nodes.Node, now time.Time) State {
 	rate := e.Rate.AsOf(now, hl)
 	typical := rate
 	typical.Weight = min(typical.Weight, 1)
+	live := typical.with(e.recent.AsOf(now, recentHalfLife))
+	live.Weight = rate.Weight
 	return State{
 		RTT:       e.RTT.AsOf(now, hl),
 		Rate:      rate,
-		Now:       typical.with(e.recent.AsOf(now, recentHalfLife)),
+		Now:       live,
 		OpenUntil: e.breaker.until,
 	}
 }

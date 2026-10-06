@@ -11,6 +11,7 @@ import (
 
 	"github.com/zhousiru/embolt/internal/measure"
 	"github.com/zhousiru/embolt/internal/nodes"
+	"github.com/zhousiru/embolt/internal/view"
 )
 
 const (
@@ -58,7 +59,18 @@ type Playback struct {
 	live       float64
 	safe, need float64 // of the media node, at the last step
 	logged     time.Time
+
+	// What the pane shows, as of the last step.
+	state   string        // starting, ok, risk or low
+	fetched float64       // Mbps read from upstream over the last step
+	primed  bool          // the buffer has passed the low mark
+	low     time.Duration // under the low mark since
+	stepped time.Time
+	history []view.Point // the last historyLen steps
 }
+
+// historyLen steps make the pane's 10 min of a session.
+const historyLen = 300
 
 // Stream is one file a playback reads from upstream, judged as a whole: its
 // observation covers every region the player reads.
@@ -73,6 +85,7 @@ type Observation struct {
 	Delivered time.Duration // media handed to players since the stream opened
 	Elapsed   time.Duration // since the stream opened
 	Full      bool          // the read-ahead filled since the last step
+	Fetched   float64       // Mbps read from upstream since the last step
 }
 
 // buffer is the media ahead of playback: the read-ahead plus a lower bound
@@ -195,6 +208,7 @@ func (s *Stream) Step(o Observation) (*nodes.Node, string) {
 	if v.stay.rate.Measured() {
 		p.live = v.stay.rate.Typical()
 	}
+	p.record(o, v, now)
 	if v.to == nil && now.Sub(p.logged) >= logEvery {
 		p.logged = now
 		slog.Info("session", "session", p.key, "media", p.node.Name, "buffer_s", round1(p.buffer.Seconds()),
@@ -212,6 +226,30 @@ func (s *Stream) Step(o Observation) (*nodes.Node, string) {
 		"buffer_s", round1(p.buffer.Seconds()), "bitrate_mbps", round1(p.bitrate),
 		"safe_mbps", round1(p.safe), "need_mbps", round1(p.need), "options", top(v.moves))
 	return v.to, reason
+}
+
+// record keeps what the step saw for the pane.
+func (p *Playback) record(o Observation, v verdict, now time.Time) {
+	under := p.buffer < BufferMin
+	if p.primed && under && !p.stepped.IsZero() {
+		p.low += now.Sub(p.stepped)
+	}
+	p.primed = p.primed || !under
+	switch {
+	case !p.primed:
+		p.state = "starting"
+	case under:
+		p.state = "low"
+	case !v.stay.meets():
+		p.state = "risk"
+	default:
+		p.state = "ok"
+	}
+	p.fetched, p.stepped = o.Fetched, now
+	if len(p.history) == historyLen {
+		p.history = slices.Delete(p.history, 0, 1)
+	}
+	p.history = append(p.history, view.Point{At: now, Buffer: p.buffer.Seconds(), Mbps: o.Fetched})
 }
 
 // verdict is what a step does with a session, and the options it weighed.
@@ -266,11 +304,12 @@ func (c *Controller) decide(p *Playback, now time.Time) verdict {
 
 // Explore picks a node to test beside the session's media node, or nil: a
 // speed test whose bytes are dropped, and the only test Embolt runs. Of the
-// nodes that may be faster than the media node, it tests the one sampled
-// longest ago: a node not known (never measured, or not for hours), else one
-// typically faster and not sampled for retestAfter. A node known to be
-// slower is left alone. A test that finds a node far faster moves the
-// session at a later step.
+// nodes that may be faster than the media node, given their evidence, it
+// tests the one that may be fastest, by upside: a node never measured
+// first, of those the quickest to answer pings. A node measured lately is
+// left alone for retestAfter, and one shown slower until its evidence
+// fades. A test that finds a node far faster moves the session at a later
+// step.
 //
 // Tests run one at a time, and a session spends on them at most
 // probes.budget of its bitrate: after a test, the next waits until the
@@ -284,29 +323,30 @@ func (s *Stream) Explore() *nodes.Node {
 	defer c.mu.Unlock()
 	now := time.Now()
 	cfg := c.cfg.Load()
-	if !s.leads() || cfg.Probes.Budget <= 0 || c.probing || now.Before(p.nextTest) || now.Before(c.refused) ||
+	if !s.leads() || cfg.Probes.Budget <= 0 || c.testing != nil || now.Before(p.nextTest) || now.Before(c.refused) ||
 		c.pinned(cfg.Pins.Media) == p.node {
 		return nil
 	}
 	media := c.stats.StateAt(p.node, now).Rate
 	var pick *nodes.Node
-	var pickRate measure.Estimate
+	var pickSt measure.State
 	for _, n := range c.usable(func(n *nodes.Node) bool { return n != p.node }) {
-		r := c.stats.StateAt(n, now).Rate
-		if r.Known() && (r.Mean <= media.Mean || now.Sub(r.At) < retestAfter) {
+		st := c.stats.StateAt(n, now)
+		if r := st.Rate; r.Measured() && (r.Upside() <= media.Typical() || now.Sub(r.At) < retestAfter) {
 			continue
 		}
-		if pick == nil || r.At.Before(pickRate.At) {
-			pick, pickRate = n, r
+		if pick == nil || cmp.Or(cmp.Compare(st.Rate.Upside(), pickSt.Rate.Upside()), cmp.Compare(pickSt.RTT.Upside(), st.RTT.Upside())) > 0 {
+			pick, pickSt = n, st
 		}
 	}
 	if pick == nil {
 		return nil
 	}
-	c.probing = true
+	pickRate := pickSt.Rate
+	c.testing = pick
 	why := "maybe faster"
-	if !pickRate.Known() {
-		why = "not known"
+	if !pickRate.Measured() {
+		why = "never measured"
 	}
 	slog.Info("explore", "session", p.key, "media", p.node.Name, "node", pick.Name, "why", why,
 		"node_mbps", mbpsLog(pickRate), "media_mbps", mbpsLog(media))
@@ -318,7 +358,7 @@ func (s *Stream) Probed(spent int64) {
 	c := s.c
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.probing = false
+	c.testing = nil
 	s.tests++
 	perSec := c.cfg.Load().Probes.Budget * s.bitrate * 1e6 / 8
 	s.nextTest = time.Now().Add(max(minTestGap, time.Duration(float64(spent)/perSec*float64(time.Second))))
@@ -326,17 +366,17 @@ func (s *Stream) Probed(spent int64) {
 
 // option is one node judged for a session.
 type option struct {
-	n     *nodes.Node
-	rate  measure.Estimate // its rate now
-	known bool             // its typical rate rests on enough recent samples
-	gap   time.Duration    // of a switch
-	safe  float64          // Mbps it keeps to most of the time: rate.Low
-	need  float64          // Mbps the session needs from it
-	rtt   float64          // ms, the tie-break
+	n    *nodes.Node
+	rate measure.Estimate // its rate now
+	gap  time.Duration    // of a switch
+	safe float64          // Mbps it keeps to most of the time, given its evidence: rate.Low
+	need float64          // Mbps the session needs from it
+	rtt  float64          // ms, the tie-break
 }
 
-// meets reports whether the node is known to deliver what the session needs.
-func (o option) meets() bool { return o.known && o.safe >= o.need }
+// meets reports whether the node is shown to deliver what the session
+// needs: a safe rate of 0 shows nothing.
+func (o option) meets() bool { return o.safe > 0 && o.safe >= o.need }
 
 // best is the one rule behind every node choice: among the options that
 // meet the target, the first by prefer; when none does, the one that falls
@@ -366,7 +406,7 @@ func (c *Controller) weigh(ns []*nodes.Node, buffer time.Duration, bitrate float
 	opts := make([]option, 0, len(ns))
 	for _, n := range ns {
 		st := c.stats.StateAt(n, now)
-		o := option{n: n, rate: st.Now, known: st.Rate.Known(), safe: st.Now.Low(), rtt: math.Inf(1)}
+		o := option{n: n, rate: st.Now, safe: st.Now.Low(), rtt: math.Inf(1)}
 		rtt := guessRTT
 		if st.RTT.Measured() {
 			o.rtt = st.RTT.Typical()
@@ -382,12 +422,14 @@ func (c *Controller) weigh(ns []*nodes.Node, buffer time.Duration, bitrate float
 }
 
 // weighStay judges the media node at the session's buffer, as weigh judges
-// the nodes the session might move to. The session watches it deliver, so
-// it counts as known, unless its breaker is open; a full read-ahead has
-// shown it keeps up, so it needs nothing more.
+// the nodes the session might move to. An open breaker shows it delivers
+// nothing; a full read-ahead has shown it keeps up, so it needs nothing
+// more.
 func (c *Controller) weighStay(p *Playback, now time.Time) option {
 	stay := c.weigh([]*nodes.Node{p.node}, p.buffer, p.bitrate, now, false)[0]
-	stay.known = !c.stats.Open(p.node, now)
+	if c.stats.Open(p.node, now) {
+		stay.safe = 0
+	}
 	if p.full {
 		stay.need = 0
 	}
@@ -451,8 +493,7 @@ func (p *Playback) Switched(n *nodes.Node, reason string) {
 }
 
 // top describes the best options for the logs, up to five: each node's safe
-// rate over its need, marked ✓ when it meets the target and ? when it is not
-// known.
+// rate over its need, marked ✓ when it meets the target.
 func top(opts []option) string {
 	opts = slices.Clone(opts)
 	slices.SortFunc(opts, func(a, b option) int { return cmp.Or(cmp.Compare(btoi(!a.meets()), btoi(!b.meets())), bySafe(a, b)) })
@@ -462,11 +503,8 @@ func top(opts []option) string {
 			b.WriteString(", ")
 		}
 		mark := ""
-		switch {
-		case o.meets():
+		if o.meets() {
 			mark = "✓"
-		case !o.known:
-			mark = "?"
 		}
 		fmt.Fprintf(&b, "%s %.1f/%.1f%s", o.n.Name, o.safe, max(0, o.need), mark)
 	}

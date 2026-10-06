@@ -1,6 +1,7 @@
 import { Link, createFileRoute } from '@tanstack/react-router'
 import { useLimits, useNode, useStatus } from '#/api/client'
-import { Badge, Buffer, Dot, Empty, Panel, PageHeader, Range, Role, SessionName, Stat, Stats, Table, Ago, clock, mbps, td } from '#/components/ui'
+import { SessionTable } from '#/components/sessions'
+import { Badge, Dot, Empty, Panel, PageHeader, Range, Role, Stat, Stats, Table, Ago, clock, mbps, td } from '#/components/ui'
 
 export const Route = createFileRoute('/_app/nodes/$id')({ component: NodeDetail })
 
@@ -46,29 +47,15 @@ function NodeDetail() {
         <Stat label="RTT">
           <Range e={n.rttMs} unit="ms" />
         </Stat>
-        <Stat label="Breaker" sub={n.breakerOpen ? `until ${clock(n.openUntil!)}` : undefined}>
-          {n.breakerOpen ? <Badge tone="bad">open</Badge> : <Badge tone="good">closed</Badge>}
+        <Stat label="Last sample">{n.sampled ? <><Ago iso={n.sampled} /> ago</> : <span className="text-zinc-400">never</span>}</Stat>
+        <Stat label="Breaker">
+          {n.breakerOpen ? <Badge tone="bad">open to {clock(n.openUntil!)}</Badge> : <Badge tone="good">closed</Badge>}
         </Stat>
       </Stats>
 
       {sessions.length > 0 && (
-        <Panel title="Sessions" flush>
-          <Table head={['Session', 'Read-ahead', 'Rate']}>
-            {sessions.map((s) => (
-              <tr key={s.key} className={s.streams === 0 ? 'opacity-50' : undefined}>
-                <td className={td}>
-                  <SessionName s={s} />
-                </td>
-                <td className={`${td} w-48`}>
-                  <Buffer seconds={s.bufferSeconds} limits={limits} />
-                </td>
-                <td className={td}>
-                  {s.liveMbps.toFixed(1)}
-                  <span className="text-zinc-500"> / {mbps(s.bitrateMbps)}</span>
-                </td>
-              </tr>
-            ))}
-          </Table>
+        <Panel title="Playing on this node" flush>
+          <SessionTable sessions={sessions} limits={limits} />
         </Panel>
       )}
 

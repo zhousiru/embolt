@@ -24,10 +24,16 @@ func TestRequiredRate(t *testing.T) {
 }
 
 func TestBurst(t *testing.T) {
-	at := func(rttMs, mbps float64) measure.State {
+	pinged := func(rttMs float64, pings int) measure.State {
 		var st measure.State
+		for range pings {
+			st.RTT.Observe(math.Log(rttMs), time.Now(), time.Hour)
+		}
+		return st
+	}
+	at := func(rttMs, mbps float64) measure.State {
+		st := pinged(rttMs, 100)
 		now := time.Now()
-		st.RTT.Observe(math.Log(rttMs), now, time.Hour)
 		if mbps > 0 {
 			st.Rate.Observe(math.Log(mbps), now, time.Hour)
 		}
@@ -38,8 +44,11 @@ func TestBurst(t *testing.T) {
 	if quick, nearby := burstMs(at(273, 75)), burstMs(at(230, 12)); quick+primaryMargin >= nearby {
 		t.Errorf("273 ms at 75 Mbps: %.0f ms, 230 ms at 12 Mbps: %.0f ms; want the first far quicker", quick, nearby)
 	}
-	if got, want := burstMs(at(100, 0)), 4*100+burstMbit*1000/guessMbps; math.Abs(got-want) > 1e-6 {
-		t.Errorf("unmeasured rate: %.0f ms, want %.0f at the guess", got, want)
+	if st := at(100, 0); math.Abs(burstMs(st)-(4*st.RTT.Upside()+burstMbit*1000/guessMbps)) > 1e-6 {
+		t.Errorf("unmeasured rate: %.0f ms, want it at the guess", burstMs(st))
+	}
+	if once, often := burstMs(pinged(100, 1)), burstMs(pinged(100, 100)); once <= often+primaryMargin {
+		t.Errorf("pinged once: %.0f ms, pinged often: %.0f ms; want the first counted far slower", once, often)
 	}
 	if got := burstMs(measure.State{}); !math.IsInf(got, 1) {
 		t.Errorf("unmeasured RTT: %.0f ms, want +Inf", got)

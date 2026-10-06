@@ -34,8 +34,9 @@ const (
 	guessMbps = 20.0
 )
 
-// burstMs is how long a node takes for a control burst, in ms; +Inf with no
-// measured RTT, so a guess never beats a measurement.
+// burstMs is how long a node takes for a control burst, in ms, at the RTT it
+// may have given its evidence, so a node pinged once or long ago counts as
+// slower; +Inf with no measured RTT, so a guess never beats a measurement.
 func burstMs(st measure.State) float64 {
 	if !st.RTT.Measured() {
 		return math.Inf(1)
@@ -44,5 +45,5 @@ func burstMs(st measure.State) float64 {
 	if st.Rate.Measured() {
 		mbps = st.Rate.Typical()
 	}
-	return burstRTTs*st.RTT.Typical() + burstMbit*1000/mbps
+	return burstRTTs*st.RTT.Upside() + burstMbit*1000/mbps
 }

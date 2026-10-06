@@ -14,8 +14,8 @@ func rateSample(mbps float64, at time.Time) Sample {
 }
 
 // TestRateNowFadesBackToTypical: a sag half a minute old decides a node's
-// rate now; ten minutes on, the node is judged by its typical rate again,
-// worth one sample, as a node not seen lately.
+// rate now; ten minutes on, the node is judged by its typical rate again.
+// Either way the rate now rests on the typical rate's evidence.
 func TestRateNowFadesBackToTypical(t *testing.T) {
 	s := NewStats(config.Static(config.Default()))
 	n := &nodes.Node{ID: "a", Name: "a"}
@@ -39,7 +39,7 @@ func TestRateNowFadesBackToTypical(t *testing.T) {
 	if now, typ := later.Now.Typical(), later.Rate.Typical(); math.Abs(now-typ)/typ > 0.01 {
 		t.Errorf("ten minutes on: rate now %.1f Mbps, want the typical %.1f", now, typ)
 	}
-	if w := later.Now.Weight; math.Abs(w-1) > 0.01 {
-		t.Errorf("ten minutes on: rate now worth %.2f samples, want 1", w)
+	if later.Now.Weight != later.Rate.Weight {
+		t.Errorf("ten minutes on: rate now worth %.2f samples, want the typical rate's %.2f", later.Now.Weight, later.Rate.Weight)
 	}
 }

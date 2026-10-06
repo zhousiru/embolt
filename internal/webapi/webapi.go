@@ -44,21 +44,29 @@ func New(d Deps) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/status", func(w http.ResponseWriter, r *http.Request) {
 		nodes := d.Ctrl.Nodes()
-		usable := 0
+		usable, measured := 0, 0
 		for _, n := range nodes {
 			if !n.BreakerOpen {
 				usable++
+				if n.RateMbps.Measured {
+					measured++
+				}
 			}
 		}
+		testing, paused := d.Ctrl.Testing()
 		reply(w, view.Status{
-			Version:  d.Version,
-			Started:  d.Started,
-			Upstream: d.Cfg.Load().Upstream.Base().Host,
-			Primary:  d.Ctrl.PrimaryRef(),
-			Nodes:    len(nodes),
-			Usable:   usable,
-			Sessions: d.named(d.Ctrl.Sessions()),
-			Limits:   d.Ctrl.Limits(),
+			Version:     d.Version,
+			Started:     d.Started,
+			Upstream:    d.Cfg.Load().Upstream.Base().Host,
+			Primary:     d.Ctrl.PrimaryRef(),
+			Nodes:       len(nodes),
+			Usable:      usable,
+			Measured:    measured,
+			Testing:     testing,
+			TestsPaused: paused,
+			Sessions:    d.named(d.Ctrl.Sessions()),
+			Recent:      d.named(d.Ctrl.Recent()),
+			Limits:      d.Ctrl.Limits(),
 		})
 	})
 	mux.HandleFunc("GET /api/v1/nodes", func(w http.ResponseWriter, r *http.Request) {

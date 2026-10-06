@@ -6,14 +6,18 @@ package view
 import "time"
 
 type Status struct {
-	Version  string    `json:"version"`
-	Started  time.Time `json:"started"`
-	Upstream string    `json:"upstream"` // host only
-	Primary  *NodeRef  `json:"primary,omitempty"`
-	Nodes    int       `json:"nodes"`
-	Usable   int       `json:"usable"` // breaker closed
-	Sessions []Session `json:"sessions"`
-	Limits   Limits    `json:"limits"`
+	Version     string    `json:"version"`
+	Started     time.Time `json:"started"`
+	Upstream    string    `json:"upstream"` // host only
+	Primary     *NodeRef  `json:"primary,omitempty"`
+	Nodes       int       `json:"nodes"`
+	Usable      int       `json:"usable"`   // breaker closed
+	Measured    int       `json:"measured"` // usable, with a rate measured
+	Testing     *NodeRef  `json:"testing,omitempty"`
+	TestsPaused time.Time `json:"testsPaused,omitzero"` // until, after the server refused a test
+	Sessions    []Session `json:"sessions"`             // playing, oldest first
+	Recent      []Session `json:"recent"`               // ended within a day, newest first
+	Limits      Limits    `json:"limits"`
 }
 
 // Limits are the control settings the pane draws against.
@@ -27,17 +31,21 @@ type NodeRef struct {
 	Name string `json:"name"`
 }
 
+// Session is one playback as of its controller's last step, or as it ended.
 type Session struct {
 	Key           string    `json:"key"`
+	State         string    `json:"state"` // starting, ok, risk, low, idle or ended
 	Media         NodeRef   `json:"media"`
-	Streams       int       `json:"streams"` // open player connections
+	Players       int       `json:"players"` // open player connections
 	BitrateMbps   float64   `json:"bitrateMbps"`
-	BufferSeconds float64   `json:"bufferSeconds"`
-	LiveMbps      float64   `json:"liveMbps"`
-	SafeMbps      float64   `json:"safeMbps"` // what its media node keeps to, see Choice
-	NeedMbps      float64   `json:"needMbps"` // what it needs over the horizon at its buffer
+	BufferSeconds float64   `json:"bufferSeconds"` // read-ahead plus a lower bound on the player's own
+	FetchedMbps   float64   `json:"fetchedMbps"`   // read from upstream over the last step
+	NodeMbps      float64   `json:"nodeMbps"`      // the media node's typical rate, 0 if not measured
 	Failovers     int       `json:"failovers"`
+	Tests         int       `json:"tests"`
+	LowSeconds    float64   `json:"lowSeconds"` // under the low mark, once first over it
 	Started       time.Time `json:"started"`
+	Ended         time.Time `json:"ended,omitzero"`
 	Item          *Item     `json:"item,omitempty"` // unknown until a player fetches the item's details
 }
 
@@ -54,32 +62,19 @@ type Item struct {
 	Image      bool   `json:"image"` // served at /api/v1/items/{id}/image
 }
 
-// SessionDetail is a session and the choice its next step faces. Once the
-// session ends, only its events remain.
+// SessionDetail is a session with its recent steps. Once the session has
+// been forgotten, only its events remain.
 type SessionDetail struct {
 	Session *Session `json:"session,omitempty"`
-	Verdict *Verdict `json:"verdict,omitempty"`
-	Choices []Choice `json:"choices"` // staying first, then moves from best
+	History []Point  `json:"history"` // oldest first, up to 10 min
 	Events  []Event  `json:"events"`
 }
 
-// Verdict is what the next step does: stay, or switch To.
-type Verdict struct {
-	To     *NodeRef `json:"to,omitempty"`
-	Reason string   `json:"reason"`
-}
-
-// Choice is one node as the session's step judges it: staying on the media
-// node, or switching to another, which delivers nothing for its gap. It
-// meets the target when it is known and SafeMbps covers NeedMbps.
-type Choice struct {
-	Node       NodeRef  `json:"node"`
-	Role       string   `json:"role"` // media or ""
-	GapSeconds float64  `json:"gapSeconds"`
-	Known      bool     `json:"known"`    // enough recent samples to trust
-	SafeMbps   float64  `json:"safeMbps"` // its rate now, one spread under the typical
-	NeedMbps   float64  `json:"needMbps"` // to keep the buffer over its low mark, after the gap
-	RateMbps   Estimate `json:"rateMbps"` // as judged: the media node's includes the stream's samples
+// Point is one step of a session.
+type Point struct {
+	At     time.Time `json:"at"`
+	Buffer float64   `json:"buffer"` // s
+	Mbps   float64   `json:"mbps"`   // fetched
 }
 
 // Estimate summarizes a node's measurements: their typical value and the
@@ -100,6 +95,7 @@ type Node struct {
 	Provider    string    `json:"provider"`
 	RTTMs       Estimate  `json:"rttMs"`
 	RateMbps    Estimate  `json:"rateMbps"`
+	Sampled     time.Time `json:"sampled,omitzero"` // its last rate sample
 	BreakerOpen bool      `json:"breakerOpen"`
 	OpenUntil   time.Time `json:"openUntil,omitzero"`
 	Roles       []string  `json:"roles"` // primary, media, pinned
