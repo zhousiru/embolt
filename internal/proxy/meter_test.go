@@ -81,3 +81,32 @@ func TestMeterEnd(t *testing.T) {
 		t.Error("a meter that read nothing gave a sample")
 	}
 }
+
+// TestMeterIsUpPastItsRamp: an attempt is up once it reads past its ramp,
+// and stays up through a pause; a new attempt is not up until its own ramp
+// is over.
+func TestMeterIsUpPastItsRamp(t *testing.T) {
+	var m meter
+	m.begin()
+	readAt(&m, 40, 900*time.Millisecond)
+	if m.upSince(time.Now()) {
+		t.Fatal("up during the ramp")
+	}
+	readAt(&m, 40, 500*time.Millisecond)
+	now := time.Now()
+	if !m.upSince(now) {
+		t.Fatal("not up past the ramp")
+	}
+	if m.upSince(now.Add(-time.Minute)) {
+		t.Error("up since before it began")
+	}
+	m.paused()
+	readAt(&m, 40, 100*time.Millisecond)
+	if !m.upSince(now) {
+		t.Error("a pause ended the attempt")
+	}
+	m.begin()
+	if m.upSince(time.Now()) {
+		t.Error("a new attempt is up before its ramp")
+	}
+}

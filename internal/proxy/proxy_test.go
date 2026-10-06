@@ -106,6 +106,44 @@ func TestFailoverMidStream(t *testing.T) {
 	}
 }
 
+// TestFailoverWhenANodeDoesNotAnswer: the first node takes the request but
+// never answers. Within answerAfter, not the transport's timeouts, the
+// stream opens on the other node.
+func TestFailoverWhenANodeDoesNotAnswer(t *testing.T) {
+	file := make([]byte, 2<<20)
+	rand.NewChaCha8([32]byte{}).Read(file)
+	var requests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			<-r.Context().Done()
+			return
+		}
+		w.Header().Set("ETag", `"v1"`)
+		http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(file))
+	}))
+	defer upstream.Close()
+
+	px := newTestProxy(t, upstream.URL)
+	req, _ := http.NewRequest(http.MethodGet, px.URL+"/Videos/42/stream?Static=true&PlaySessionId=p1", nil)
+	req.Header.Set("Range", "bytes=0-")
+	start := time.Now()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusPartialContent || !bytes.Equal(got, file) {
+		t.Fatalf("status %d, %d bytes; want 206 and the whole file", resp.StatusCode, len(got))
+	}
+	if d := time.Since(start); d > answerAfter+3*time.Second {
+		t.Errorf("failover took %v, want about answerAfter (%v)", d, answerAfter)
+	}
+}
+
 func newTestProxy(t *testing.T, upstream string, extra ...string) *httptest.Server {
 	t.Helper()
 	s, _ := newTestServer(t, upstream, extra...)

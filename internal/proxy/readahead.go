@@ -446,16 +446,20 @@ const maxAhead = 2 * time.Minute
 // since the player stalls when any runs dry, and at most maxAhead, which
 // is plenty: a file fully fetched reports that. Played is what the regions
 // being played delivered lately, which picks the lead among a session's files.
-func (f *file) observe(now time.Time) (control.Observation, *span) {
+// Flowing is whether each of those regions had its upstream past its ramp
+// since the last step at since: else the step saw a start, a seek, a resume
+// or a switch, whose setup any node would cost.
+func (f *file) observe(now, since time.Time) (control.Observation, *span) {
 	main, total := f.lead(now)
 	if main == nil {
 		return control.Observation{}, nil
 	}
-	secs := maxAhead.Seconds()
+	secs, flowing := maxAhead.Seconds(), true
 	for _, sp := range f.spans {
 		if !sp.playing(now) || sp.fetched() {
 			continue
 		}
+		flowing = flowing && (sp.feed == nil || sp.feed.meter.upSince(since))
 		share := 1.0
 		if total > 0 {
 			share = sp.decayed(now) / total
@@ -467,6 +471,7 @@ func (f *file) observe(now time.Time) (control.Observation, *span) {
 	return control.Observation{
 		ReadAhead: time.Duration(secs * float64(time.Second)),
 		Played:    total,
+		Flowing:   flowing,
 	}, main
 }
 
@@ -488,7 +493,7 @@ func (f *file) supervise(ctx context.Context) {
 		}
 		ra.mu.Lock()
 		now := time.Now()
-		obs, main := f.observe(now)
+		obs, main := f.observe(now, at)
 		obs.Fetched = float64(f.fetched-fetched) * 8 / now.Sub(at).Seconds() / 1e6
 		fetched, at = f.fetched, now
 		var feeds []*feed

@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"maps"
 	"net/url"
 	"sync"
 	"sync/atomic"
@@ -46,20 +47,22 @@ type Controller struct {
 	mu      sync.Mutex
 	primary *nodes.Node
 	plays   map[string]*Playback
-	refused time.Time   // exploration paused until
-	testing *nodes.Node // under a speed test, nil if none
-	ended   []ended     // newest last, within keepEnded
-	peak    float64     // highest bitrate played within peakMemory
+	refused time.Time            // exploration paused until
+	testing *nodes.Node          // under a speed test, nil if none
+	tested  map[string]time.Time // when each node, by ID, last took a test's turn
+	ended   []ended              // newest last, within keepEnded
+	peak    float64              // highest bitrate played within peakMemory
 	peakAt  time.Time
 }
 
 func New(cfg *config.Store, pool *nodes.Pool, stats *measure.Stats) *Controller {
 	return &Controller{
-		cfg:   cfg,
-		pool:  pool,
-		stats: stats,
-		base:  cfg.Load().Upstream.Base(),
-		plays: map[string]*Playback{},
+		cfg:    cfg,
+		pool:   pool,
+		stats:  stats,
+		base:   cfg.Load().Upstream.Base(),
+		plays:  map[string]*Playback{},
+		tested: map[string]time.Time{},
 	}
 }
 
@@ -206,6 +209,7 @@ func (c *Controller) playing() bool {
 func (c *Controller) expire() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	maps.DeleteFunc(c.tested, func(_ string, at time.Time) bool { return time.Since(at) > retestAfter })
 	for key, p := range c.plays {
 		if len(p.streams) == 0 && time.Since(p.idle) > playLinger {
 			delete(c.plays, key)

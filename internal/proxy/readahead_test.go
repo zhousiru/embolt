@@ -270,7 +270,7 @@ func TestReadAheadIsTheShortestRegion(t *testing.T) {
 
 	one := &file{bitrate: 8} // 1 MB/s
 	only := testSpan(one, 0, 20*mb, 10*mb, 1, now, true)
-	if obs, main := one.observe(now); main != only || secs(obs.ReadAhead) != at(10*mb, 1) {
+	if obs, main := one.observe(now, now); main != only || secs(obs.ReadAhead) != at(10*mb, 1) {
 		t.Errorf("one span: %v, main %v; want 10 MB at the full bitrate", obs.ReadAhead, main == only)
 	}
 
@@ -280,7 +280,7 @@ func TestReadAheadIsTheShortestRegion(t *testing.T) {
 	mixed := &file{bitrate: 8}
 	video := testSpan(mixed, 0, 60*mb, 10*mb, 95, now, true)
 	testSpan(mixed, 100*mb, 102*mb, 101*mb, 5, now, false) // read within revisit
-	if obs, main := mixed.observe(now); main != video || secs(obs.ReadAhead) != at(mb, 0.05) {
+	if obs, main := mixed.observe(now, now); main != video || secs(obs.ReadAhead) != at(mb, 0.05) {
 		t.Errorf("interleaved: %v, main is video %v; want the audio's %.2fs", obs.ReadAhead, main == video, at(mb, 0.05))
 	}
 
@@ -293,7 +293,7 @@ func TestReadAheadIsTheShortestRegion(t *testing.T) {
 	index := testSpan(tail, 90*mb, 100*mb, 100*mb, 50, now, true)
 	index.end = 100*mb - 1
 	testSpan(tail, 70*mb, 71*mb, 70*mb, 1e-12, now, true)
-	if obs, _ := tail.observe(now); secs(obs.ReadAhead) != at(50*mb, 0.5) {
+	if obs, _ := tail.observe(now, now); secs(obs.ReadAhead) != at(50*mb, 0.5) {
 		t.Errorf("with a fetched and a quiet region: %v, want the video's %.2fs", obs.ReadAhead, at(50*mb, 0.5))
 	}
 
@@ -303,8 +303,32 @@ func TestReadAheadIsTheShortestRegion(t *testing.T) {
 	old := testSpan(seek, 0, 300*mb, 290*mb, 1e9, now.Add(-time.Hour), false)
 	old.recentAt = now.Add(-2 * revisit)
 	jumped := testSpan(seek, 500*mb, 502*mb, 500*mb, 1, now, true)
-	obs, main := seek.observe(now)
+	obs, main := seek.observe(now, now)
 	if main != jumped || secs(obs.ReadAhead) != at(2*mb, 1) {
 		t.Errorf("after a seek: %v, main is the new span %v; want the new span's 2 MB", obs.ReadAhead, main == jumped)
+	}
+}
+
+// TestObserveFlowsOnlyPastEveryRamp: a step flows when every region being
+// played read from upstream past its ramp since the last step.
+func TestObserveFlowsOnlyPastEveryRamp(t *testing.T) {
+	now := time.Now()
+	last := now.Add(-stepEvery)
+	f := &file{bitrate: 8}
+	video := testSpan(f, 0, 20<<20, 10<<20, 95, now, true)
+	audio := testSpan(f, 100<<20, 101<<20, 100<<20, 5, now, true)
+	video.feed, audio.feed = &feed{}, &feed{}
+	video.feed.meter.upAt.Store(last.Add(-time.Second).UnixNano())
+	audio.feed.meter.upAt.Store(last.Add(-time.Second).UnixNano())
+	if obs, _ := f.observe(now, last); !obs.Flowing {
+		t.Error("both regions up since before the last step: not flowing")
+	}
+	audio.feed.meter.begin() // the audio region resumes on another node
+	if obs, _ := f.observe(now, last); obs.Flowing {
+		t.Error("a region reopening: flowing")
+	}
+	audio.feed.meter.upAt.Store(now.Add(-time.Second).UnixNano())
+	if obs, _ := f.observe(now, last); obs.Flowing {
+		t.Error("a region up only since mid-step: flowing")
 	}
 }

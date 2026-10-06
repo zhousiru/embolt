@@ -64,12 +64,12 @@ func (t test) run(ctx context.Context, play *control.Stream, n *nodes.Node) {
 }
 
 // read fetches the stretch until it is done, its time is up, or the node
-// fails: no answer within 2·stallAfter, or no byte for stallAfter. It returns
-// the bytes read.
+// fails as a feed does: no answer within answerAfter, or no byte for
+// stallAfter. It returns the bytes read.
 func (t test) read(ctx context.Context, n *nodes.Node, m *meter) (int64, error) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
-	watchdog := time.AfterFunc(2*stallAfter, func() { cancel(errStall) })
+	watchdog := time.AfterFunc(answerAfter, func() { cancel(errStall) })
 	defer watchdog.Stop()
 	req := t.req.Clone(ctx)
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", t.from, t.end))

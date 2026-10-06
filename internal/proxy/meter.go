@@ -28,7 +28,8 @@ type meter struct {
 	totalDur   time.Duration
 	sampledAny bool
 
-	filled atomic.Bool // the read-ahead filled since the last full
+	filled atomic.Bool  // the read-ahead filled since the last full
+	upAt   atomic.Int64 // when the attempt first read past its ramp, Unix ns; 0 before
 }
 
 // read counts n bytes read in d and returns a sample when a window completes.
@@ -38,6 +39,9 @@ func (m *meter) read(n int, d time.Duration) (measure.Sample, bool) {
 	if m.warm > 0 {
 		m.warm -= d
 		return measure.Sample{}, false
+	}
+	if m.upAt.Load() == 0 {
+		m.upAt.Store(time.Now().UnixNano())
 	}
 	m.bytes += int64(n)
 	if m.dur += d; m.dur < measure.Window {
@@ -73,6 +77,21 @@ func (m *meter) paused() {
 
 // restart begins a new window after a ramp.
 func (m *meter) restart() { m.warm, m.bytes, m.dur = rampTime, 0, 0 }
+
+// begin starts a new upstream attempt: it is not up until it reads past its
+// ramp. A pause is no new attempt.
+func (m *meter) begin() {
+	m.upAt.Store(0)
+	m.restart()
+}
+
+// upSince reports whether the attempt has been reading past its ramp since
+// t: what the feed delivered since then is the node's own doing, not a
+// connection's setup.
+func (m *meter) upSince(t time.Time) bool {
+	at := m.upAt.Load()
+	return at != 0 && at <= t.UnixNano()
+}
 
 // full reports whether the read-ahead filled since the last call, for the
 // controller's step.

@@ -26,6 +26,7 @@ const (
 	chunkSize   = 64 << 10
 	maxWindow   = 256 << 20        // most read-ahead of one file's main read
 	stallAfter  = 4 * time.Second  // no bytes this long: fail over at once
+	answerAfter = 2 * stallAfter   // no answer this long: the same
 	pauseLimit  = 30 * time.Second // read-ahead full this long: close the upstream
 	stepEvery   = 2 * time.Second  // controller evaluation period
 	maxAttempts = 3
@@ -162,6 +163,7 @@ func (fd *feed) run(resp *http.Response) {
 // the node cannot connect.
 func (fd *feed) start(rng string) (*http.Response, error) {
 	n := fd.play.Node()
+	fd.meter.begin()
 	for range maxAttempts {
 		resp, err := fd.open(fd.ctx, n, rng, "")
 		if err == nil {
@@ -169,7 +171,6 @@ func (fd *feed) start(rng string) (*http.Response, error) {
 				fd.play.Switched(n, "error")
 			}
 			fd.node = n
-			fd.meter.restart()
 			return resp, nil
 		}
 		if fd.ctx.Err() != nil {
@@ -183,20 +184,30 @@ func (fd *feed) start(rng string) (*http.Response, error) {
 }
 
 // open sends one upstream attempt on n under its own cancellable context.
-// A redirect-fronted server's 302 is followed on the same node, with the
-// player's headers, and the final link is reused for later seeks.
+// An attempt that does not answer within answerAfter is a stall, as one that
+// stops delivering is, so a node that cannot connect costs seconds, not the
+// transport's timeouts. A redirect-fronted server's 302 is followed on the
+// same node, with the player's headers, and the final link is reused for
+// later seeks.
 func (fd *feed) open(ctx context.Context, n *nodes.Node, rng, ifRange string) (*http.Response, error) {
 	actx, cancel := context.WithCancelCause(ctx)
+	watchdog := time.AfterFunc(answerAfter, func() { cancel(errStall) })
 	req := fd.req.Clone(actx)
 	setOrDel(req.Header, "Range", rng)
 	setOrDel(req.Header, "If-Range", ifRange)
 
 	resp, err := fd.s.fetch(n, req)
-	fd.s.observe(ctx, n, err)
-	if err != nil {
+	watchdog.Stop()
+	if err == nil && actx.Err() != nil { // it answered as time ran out, or as the span went
+		resp.Body.Close()
+	}
+	if err != nil || actx.Err() != nil {
+		err = causeOf(actx, err)
+		fd.s.observe(ctx, n, err)
 		cancel(err)
 		return nil, err
 	}
+	fd.s.observe(ctx, n, nil)
 	a := &attempt{resp.Body, actx, cancel}
 	fd.mu.Lock()
 	fd.live = a
@@ -317,14 +328,17 @@ func (fd *feed) awaitRoom(a *attempt) error {
 // switch goes to its choice; a stall or error fails over to the best
 // other node, or follows the session if another feed already moved it; a
 // pause reopens on the session's media node once the players have drained
-// half the read-ahead. Only a node that cannot connect is failed over: any
-// answer from the server ends the feed, since another node would get the
-// same. If-Range guards against a file that changed: a 200 instead of 206.
+// half the read-ahead. Until the new attempt is past its ramp, the node is
+// not judged on what the feed delivers. Only a node that cannot connect or
+// does not answer in time is failed over: any answer from the server ends
+// the feed, since another node would get the same. If-Range guards against
+// a file that changed: a 200 instead of 206.
 func (fd *feed) resume(ctx context.Context, cause error) (*http.Response, error) {
 	rng := fmt.Sprintf("bytes=%d-", fd.off)
 	if fd.end >= 0 {
 		rng += strconv.FormatInt(fd.end, 10)
 	}
+	fd.meter.begin()
 	var n *nodes.Node
 	reason := ""
 	var sw switchTo
@@ -355,7 +369,6 @@ func (fd *feed) resume(ctx context.Context, cause error) (*http.Response, error)
 		case err != nil:
 		case resp.StatusCode == http.StatusPartialContent && fd.sameFile(resp):
 			fd.node = n
-			fd.meter.restart()
 			if n != fd.play.Node() {
 				fd.play.Switched(n, reason)
 			}

@@ -86,6 +86,7 @@ type Observation struct {
 	Played    float64       // bytes handed to players lately, decaying
 	Full      bool          // the read-ahead filled since the last step
 	Fetched   float64       // Mbps read from upstream since the last step
+	Flowing   bool          // every region played was read from upstream past its ramp all step
 }
 
 // owe updates the session's deficit: the media its node fell short of the
@@ -93,18 +94,20 @@ type Observation struct {
 // player filling its own buffer takes all it is handed and leaves the
 // read-ahead thin, so the read-ahead alone says nothing; what the node
 // delivers does. One step's rate swings widely, so the shortfall adds up
-// over steps. A full or long read-ahead, or a fresh switch, clears it: each
-// node answers for its own delivery.
+// over consecutive steps; a session's first step, or its first after a
+// spell unplayed, starts afresh. A full or long read-ahead, or a fresh
+// switch, clears it: each node answers for its own delivery. A step that
+// is not flowing changes nothing: a start, a seek, a resume or a switch
+// costs a connection's setup on any node.
 func (p *Playback) owe(o Observation, now time.Time) {
-	dt := stepGap
-	if !p.stepped.IsZero() {
-		dt = min(now.Sub(p.stepped), 2*stepGap)
-	}
-	if o.Full || o.ReadAhead >= riskAhead || now.Sub(p.switched) < minSwitchGap {
+	dt := now.Sub(p.stepped)
+	switch {
+	case p.stepped.IsZero() || dt > 2*stepGap || o.Full || o.ReadAhead >= riskAhead ||
+		now.Sub(p.switched) < minSwitchGap:
 		p.deficit = 0
-		return
+	case o.Flowing:
+		p.deficit = max(0, p.deficit+time.Duration(float64(dt)*(1-o.Fetched/p.bitrate)))
 	}
-	p.deficit = max(0, p.deficit+time.Duration(float64(dt)*(1-o.Fetched/p.bitrate)))
 }
 
 // behind reports whether the session's node has fallen maxDeficit behind.
@@ -319,9 +322,12 @@ func other(n *nodes.Node) func(*nodes.Node) bool {
 
 // Explore picks a node to test beside the session's media node, or nil: a
 // speed test whose bytes are dropped, and the only test Embolt runs. It
-// tests every node in turn, the one sampled longest ago first and a node
-// never measured before all, ties to the lowest RTT; a node sampled within
-// retestAfter waits.
+// tests every node in turn, the one whose turn came longest ago first and a
+// node never measured or tested before all, ties to the lowest RTT; a node
+// whose turn came within retestAfter waits. A node's turn is its last rate
+// sample or its last test, whichever is later: a test that fails takes its
+// turn as one that succeeds does, and the breaker, not the turns, keeps a
+// failing node out of playback.
 //
 // Tests run one at a time, and a session spends on them at most
 // probes.budget of its bitrate: after a test, the next waits until the
@@ -339,19 +345,25 @@ func (s *Stream) Explore() *nodes.Node {
 	}
 	var pick *nodes.Node
 	var pickSt measure.State
+	var pickTurn time.Time
 	for _, n := range c.usable(other(p.node)) {
 		st := c.stats.State(n)
-		if st.Rate.Measured() && now.Sub(st.Rate.At) < retestAfter {
+		turn := st.Rate.At
+		if t := c.tested[n.ID]; t.After(turn) {
+			turn = t
+		}
+		if !turn.IsZero() && now.Sub(turn) < retestAfter {
 			continue
 		}
-		if pick == nil || cmp.Or(st.Rate.At.Compare(pickSt.Rate.At), cmp.Compare(rttMs(st), rttMs(pickSt))) < 0 {
-			pick, pickSt = n, st
+		if pick == nil || cmp.Or(turn.Compare(pickTurn), cmp.Compare(rttMs(st), rttMs(pickSt))) < 0 {
+			pick, pickSt, pickTurn = n, st, turn
 		}
 	}
 	if pick == nil {
 		return nil
 	}
 	c.testing = pick
+	c.tested[pick.ID] = now
 	why := "never measured"
 	if pickSt.Rate.Measured() {
 		why = fmt.Sprintf("measured %.0f min ago", now.Sub(pickSt.Rate.At).Minutes())
@@ -396,6 +408,7 @@ func (p *Playback) Switched(n *nodes.Node, reason string) {
 	failovers.WithLabelValues(reason).Inc()
 	p.node = n
 	p.switched = time.Now()
+	p.deficit = 0
 }
 
 // top describes the fastest nodes for the logs, up to five: each with its

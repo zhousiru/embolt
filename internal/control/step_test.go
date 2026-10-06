@@ -63,7 +63,7 @@ func step(s *Stream, o Observation) (*nodes.Node, string) {
 // behind is an observation of a read-ahead of secs seconds on a node
 // delivering almost nothing: each step adds most of stepGap to the deficit.
 func behind(secs float64) Observation {
-	return Observation{ReadAhead: time.Duration(secs * float64(time.Second)), Fetched: 1}
+	return Observation{ReadAhead: time.Duration(secs * float64(time.Second)), Fetched: 1, Flowing: true}
 }
 
 func TestStartsOnTheFastestNode(t *testing.T) {
@@ -114,10 +114,10 @@ func TestStepStaysWhileTheNodeKeepsUp(t *testing.T) {
 	s, _ := c.Play("tv/1", 22)
 	record(c.stats, n["a"], 0, 1, 1, 1) // a's average sagged under b, but it delivers
 	for _, o := range []Observation{
-		{ReadAhead: time.Second, Fetched: 22},
-		{ReadAhead: 0, Fetched: 22},
-		{ReadAhead: 14 * time.Second, Full: true, Fetched: 1},
-		{ReadAhead: 30 * time.Second, Fetched: 1},
+		{ReadAhead: time.Second, Fetched: 22, Flowing: true},
+		{ReadAhead: 0, Fetched: 22, Flowing: true},
+		{ReadAhead: 14 * time.Second, Full: true, Fetched: 1, Flowing: true},
+		{ReadAhead: 30 * time.Second, Fetched: 1, Flowing: true},
 	} {
 		for range 3 {
 			if got, _ := step(s, o); got != nil || s.state != "ok" {
@@ -138,13 +138,13 @@ func TestStepRidesOutNoise(t *testing.T) {
 		if i%2 == 0 {
 			mbps = 10
 		}
-		if got, _ := step(s, Observation{Fetched: mbps}); got != nil || s.state != "ok" {
+		if got, _ := step(s, Observation{Fetched: mbps, Flowing: true}); got != nil || s.state != "ok" {
 			t.Fatalf("step %d at %v Mbps: Step = %v, state %q, deficit %v; want stay, ok", i, mbps, got, s.state, s.deficit)
 		}
 	}
 	// Under the bitrate for good, it falls behind and moves.
 	for range 4 {
-		if got, _ := step(s, Observation{Fetched: 10}); got != nil {
+		if got, _ := step(s, Observation{Fetched: 10, Flowing: true}); got != nil {
 			if got != n["b"] {
 				t.Errorf("behind: moved to %v, want b", got)
 			}
@@ -162,16 +162,16 @@ func TestOnlyTheLeadStreamDecides(t *testing.T) {
 	}
 	scan, _ := c.Play("tv/1", 22)
 	record(c.stats, n["a"], 0, 1, 1, 1)
-	step(play, Observation{ReadAhead: 30 * time.Second, Played: 1e6, Fetched: 22})
+	step(play, Observation{ReadAhead: 30 * time.Second, Played: 1e6, Fetched: 22, Flowing: true})
 	// The scan reads a little, slowly: alone it would look behind.
 	for range 3 {
-		if got, _ := scan.Step(Observation{ReadAhead: time.Second, Played: 1e3, Fetched: 1}); got != nil {
+		if got, _ := scan.Step(Observation{ReadAhead: time.Second, Played: 1e3, Fetched: 1, Flowing: true}); got != nil {
 			t.Errorf("a side connection switched the session to %v", got)
 		}
 	}
 	// The same on the lead stream does move the session.
-	step(play, Observation{ReadAhead: time.Second, Played: 1e6, Fetched: 1})
-	if got, _ := step(play, Observation{ReadAhead: time.Second, Played: 1e6, Fetched: 1}); got != n["b"] {
+	step(play, Observation{ReadAhead: time.Second, Played: 1e6, Fetched: 1, Flowing: true})
+	if got, _ := step(play, Observation{ReadAhead: time.Second, Played: 1e6, Fetched: 1, Flowing: true}); got != n["b"] {
 		t.Errorf("lead stream behind: Step = %v, want a switch to b", got)
 	}
 }
@@ -211,6 +211,51 @@ func TestStepWaitsAfterASwitch(t *testing.T) {
 	}
 	if got, _ := step(s, behind(1)); got != n["a"] {
 		t.Errorf("once the switch settled: Step = %v, want a, the fastest", got)
+	}
+}
+
+// TestStepJudgesOnlyAFlowingNode: while a region's upstream opens or ramps
+// up, as after a start, a seek or a resume, any node delivers little; the
+// session neither holds that against its node nor forgets what the node
+// fell short before.
+func TestStepJudgesOnlyAFlowingNode(t *testing.T) {
+	c, n := testController(t, map[string][]float64{"a": {100}, "b": {50}})
+	s, _ := c.Play("tv/1", 22)
+	record(c.stats, n["a"], 0, 1, 1, 1) // b is faster on paper: only the rule holds the session
+	step(s, behind(1))
+	step(s, behind(1))
+	short := s.deficit
+	for range 5 {
+		if got, why := step(s, Observation{Fetched: 0}); got != nil || s.deficit != short {
+			t.Fatalf("an upstream opening: Step = %v (%s), deficit %v; want stay, deficit %v", got, why, s.deficit, short)
+		}
+	}
+	if got, _ := step(s, behind(1)); got != n["b"] {
+		t.Errorf("flowing again and behind: Step = %v, deficit %v; want a move to b", got, s.deficit)
+	}
+}
+
+// TestStepStartsAfreshAfterAGap replays 15:09:56 of the 2026-10-06 session
+// ZHOUSIRU-PC/1513207: the player came back after 97 s without a stream, and
+// its first step, upstream still connecting, counted two steps of nothing
+// on top of the deficit it left with. The session moved off a node that had
+// kept up.
+func TestStepStartsAfreshAfterAGap(t *testing.T) {
+	c, n := testController(t, map[string][]float64{"a": {43}, "b": {47.5}})
+	s, _ := c.Play("tv/1513207", 55.5)
+	if s.Node() != n["b"] {
+		t.Fatalf("media node %v, want b", s.Node())
+	}
+	s.Switched(n["a"], "risk")
+	s.switched = s.switched.Add(-minSwitchGap)
+	step(s, Observation{ReadAhead: 8 * time.Second, Fetched: 43, Flowing: true})
+	step(s, Observation{ReadAhead: 9 * time.Second, Fetched: 41, Flowing: true})
+	s.stepped = s.stepped.Add(-97 * time.Second)
+	for _, o := range []Observation{{Fetched: 0, Flowing: true}, {Fetched: 0}, {Fetched: 14, Flowing: true}} {
+		if got, why := s.Step(o); got != nil {
+			t.Fatalf("back after 97 s: Step(%+v) = %v (%s), deficit %v; want stay", o, got, why, s.deficit)
+		}
+		s.stepped = s.stepped.Add(-stepGap)
 	}
 }
 
@@ -372,6 +417,7 @@ func TestExploreTakesTurns(t *testing.T) {
 		if got != nil {
 			s.Probed(0)
 			s.nextTest = time.Time{}
+			c.tested[got.ID] = time.Now().Add(-2 * retestAfter) // only the samples below set turns
 		}
 		return got
 	}
@@ -390,6 +436,33 @@ func TestExploreTakesTurns(t *testing.T) {
 	record(c.stats, n["c"], 0, 900)
 	if got := explore(); got != nil {
 		t.Errorf("Explore = %v, want none: every node measured lately", got)
+	}
+}
+
+// TestExploreCountsAFailedTest replays 15:10:56-15:13:44 of the 2026-10-06
+// session ZHOUSIRU-PC/1513207: a node that never answered a test stayed
+// never measured, so it came first again at every test, four times in three
+// minutes, while thirty nodes waited for their first.
+func TestExploreCountsAFailedTest(t *testing.T) {
+	c, n := testController(t, map[string][]float64{"a": {50}})
+	s, _ := c.Play("tv/1513207", 10)
+	record(c.stats, n["b"], 2*time.Hour, 30)
+	if got := s.Explore(); got != n["c"] {
+		t.Fatalf("Explore = %v, want c, never measured", got)
+	}
+	s.Probed(0) // it stalled: no rate
+	s.nextTest = time.Time{}
+	if got := s.Explore(); got != n["b"] {
+		t.Fatalf("after c failed its test: Explore = %v, want b, whose turn came longest ago", got)
+	}
+	s.Probed(0)
+	s.nextTest = time.Time{}
+	if got := s.Explore(); got != nil {
+		t.Fatalf("Explore = %v, want none: every node took its turn lately", got)
+	}
+	c.tested[n["c"].ID] = time.Now().Add(-retestAfter - time.Second)
+	if got := s.Explore(); got != n["c"] {
+		t.Errorf("Explore = %v, want c once its turn is retestAfter old", got)
 	}
 }
 

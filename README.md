@@ -60,25 +60,30 @@ delivering under the bitrate drains the player. Every 2 s, each session:
    3 s of media less than the bitrate calls for, net of what it delivered
    over, unless that node is no faster than its own: then the server, not
    the node, is slow. One step's rate swings widely; the shortfall counts
-   only as it adds up. A full or long read-ahead, or a switch, clears it;
+   only as it adds up over consecutive steps. A step while a connection
+   opens or ramps up counts for nothing, since a start, a seek, a resume or
+   a switch costs any node its setup. A full or long read-ahead, a switch,
+   or a spell with no player clears it;
 3. once on its node for 5 min, moves for speed alone to a node measured in
    the last 30 min at 1.5× its own node's rate;
 4. else stays.
 
-No byte for 4 s, or a connection error, fails over at once to the fastest
-other node. The primary is the node quickest to deliver a page of browsing,
-four round trips and 3 MB, and gives way only to a node 100 ms quicker,
-while nothing plays.
+No answer within 8 s, no byte for 4 s, or a connection error fails over at
+once to the fastest other node. The primary is the node quickest to deliver
+a page of browsing, four round trips and 3 MB, and gives way only to a node
+100 ms quicker, while nothing plays.
 
 Rates are learned from playback alone. Every stream samples its media node,
 and a session tests other nodes beside it: while its media node keeps
 reading, another node reads the stretch just past the read-ahead, up to
 32 MB for up to 8 s, and its bytes are dropped. A node that fails the test
-costs the session nothing. Every node takes its turn: never measured first,
-then the one measured longest ago; a node measured in the last 30 min
-waits. One test runs at a time, within a budget: after a test, a session
-waits until it has played 1/`probes.budget` (20×) the test's bytes, and at
-least 30 s. A test costs a second connection, through a second exit IP.
+costs the session nothing. Every node takes its turn: never tested or
+measured first, then the one whose last test or sample came longest ago; a
+node tested or measured in the last 30 min waits, whether its test
+succeeded or not. One test runs at a time, within a budget: after a test, a
+session waits until it has played 1/`probes.budget` (20×) the test's bytes,
+and at least 30 s. A test costs a second connection, through a second exit
+IP.
 
 ### Logs
 
