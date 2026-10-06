@@ -16,8 +16,9 @@ import (
 
 const (
 	minSwitchGap = 20 * time.Second // after a switch, before the next
-	riskAhead    = 20 * time.Second // a read-ahead under this, on a node behind the bitrate...
-	riskSteps    = 2                // ...for this many steps in a row moves the session
+	riskAhead    = 20 * time.Second // a read-ahead under this lets the node fall behind...
+	maxDeficit   = 3 * time.Second  // ...by this much media, and the session moves
+	stepGap      = 2 * time.Second  // between steps, as the proxy runs them
 	headroom     = 1.2              // over the bitrate, for the primary to take a new session
 	migrateGap   = 5 * time.Minute  // the least time on a node before a move for speed
 	migrateGain  = 1.5              // how much faster a node must be to take a session that keeps up
@@ -57,8 +58,8 @@ type Playback struct {
 	viewers   int // player connections
 	idle      time.Time
 	ahead     time.Duration
-	full      bool // the read-ahead filled since the last step
-	short     int  // steps in a row the session was behind
+	full      bool          // the read-ahead filled since the last step
+	deficit   time.Duration // media the node fell short of the bitrate while the read-ahead was thin
 	logged    time.Time
 
 	// What the pane shows, as of the last step.
@@ -87,13 +88,27 @@ type Observation struct {
 	Fetched   float64       // Mbps read from upstream since the last step
 }
 
-// behind reports whether the node is draining the player: the read-ahead is
-// under riskAhead and not filling, and upstream delivered under the bitrate.
-// A player filling its own buffer after a start or a seek takes all it is
-// handed, so the read-ahead alone says nothing; the rate does.
-func (o Observation) behind(bitrate float64) bool {
-	return !o.Full && o.ReadAhead < riskAhead && o.Fetched < bitrate
+// owe updates the session's deficit: the media its node fell short of the
+// bitrate over the step, less what it delivered over, never under zero. A
+// player filling its own buffer takes all it is handed and leaves the
+// read-ahead thin, so the read-ahead alone says nothing; what the node
+// delivers does. One step's rate swings widely, so the shortfall adds up
+// over steps. A full or long read-ahead, or a fresh switch, clears it: each
+// node answers for its own delivery.
+func (p *Playback) owe(o Observation, now time.Time) {
+	dt := stepGap
+	if !p.stepped.IsZero() {
+		dt = min(now.Sub(p.stepped), 2*stepGap)
+	}
+	if o.Full || o.ReadAhead >= riskAhead || now.Sub(p.switched) < minSwitchGap {
+		p.deficit = 0
+		return
+	}
+	p.deficit = max(0, p.deficit+time.Duration(float64(dt)*(1-o.Fetched/p.bitrate)))
 }
+
+// behind reports whether the session's node has fallen maxDeficit behind.
+func (p *Playback) behind() bool { return p.deficit >= maxDeficit }
 
 // Play joins or starts the session key with a new stream. bitrate is in
 // Mbps, 0 if unknown. Callers must Release the stream when it ends.
@@ -202,11 +217,7 @@ func (s *Stream) Step(o Observation) (*nodes.Node, string) {
 	}
 	now := time.Now()
 	p.ahead, p.full = o.ReadAhead, o.Full
-	if o.behind(p.bitrate) {
-		p.short++
-	} else {
-		p.short = 0
-	}
+	p.owe(o, now)
 	to, why, faster := c.decide(p, now)
 	p.record(o, now)
 	rate := c.stats.State(p.node).Rate
@@ -214,7 +225,7 @@ func (s *Stream) Step(o Observation) (*nodes.Node, string) {
 		if now.Sub(p.logged) >= logEvery {
 			p.logged = now
 			slog.Info("session", "session", p.key, "media", p.node.Name, "ahead_s", round1(p.ahead.Seconds()),
-				"full", p.full, "fetched_mbps", round1(o.Fetched), "node_mbps", mbpsLog(rate),
+				"deficit_s", round1(p.deficit.Seconds()), "full", p.full, "fetched_mbps", round1(o.Fetched), "node_mbps", mbpsLog(rate),
 				"bitrate_mbps", round1(p.bitrate), "verdict", why)
 		}
 		return nil, ""
@@ -224,21 +235,22 @@ func (s *Stream) Step(o Observation) (*nodes.Node, string) {
 		reason = "faster"
 	}
 	slog.Info("move", "session", p.key, "from", p.node.Name, "to", to.Name, "reason", reason, "why", why,
-		"ahead_s", round1(p.ahead.Seconds()), "fetched_mbps", round1(o.Fetched), "bitrate_mbps", round1(p.bitrate),
-		"node_mbps", mbpsLog(rate), "options", top(c.rank(c.usable(other(p.node)))))
+		"ahead_s", round1(p.ahead.Seconds()), "deficit_s", round1(p.deficit.Seconds()), "fetched_mbps", round1(o.Fetched),
+		"bitrate_mbps", round1(p.bitrate), "node_mbps", mbpsLog(rate), "options", top(c.rank(c.usable(other(p.node)))))
+	p.deficit = 0 // the next node starts afresh, and the move is not asked again before it lands
 	return to, reason
 }
 
 // record keeps what the step saw for the pane.
 func (p *Playback) record(o Observation, now time.Time) {
-	under := p.short > 0 && p.ahead < LowMark
+	under := p.behind() && p.ahead < LowMark
 	if under && !p.stepped.IsZero() {
 		p.low += now.Sub(p.stepped)
 	}
 	switch {
 	case under:
 		p.state = "low"
-	case p.short > 0:
+	case p.behind():
 		p.state = "risk"
 	default:
 		p.state = "ok"
@@ -253,7 +265,7 @@ func (p *Playback) record(o Observation, now time.Time) {
 // decide moves a session, or keeps it, and says why:
 //
 //  1. Stay on a pinned node, or on one switched to moments ago.
-//  2. When the session has been behind for riskSteps steps, move to the
+//  2. When the node has fallen maxDeficit behind the bitrate, move to the
 //     fastest other node, unless it is no faster than the media node: then
 //     the server, not the node, is slow.
 //  3. When the session has been on its node for migrateGap and keeps up,
@@ -269,10 +281,8 @@ func (c *Controller) decide(p *Playback, now time.Time) (to *nodes.Node, why str
 		return nil, "pinned", false
 	case now.Sub(p.switched) < minSwitchGap:
 		return nil, "switched moments ago", false
-	case p.short >= riskSteps:
+	case p.behind():
 		return c.rescue(p)
-	case p.short > 0:
-		return nil, "behind", false
 	case now.Sub(p.started) < migrateGap || now.Sub(p.switched) < migrateGap:
 		return nil, "keeps up", false
 	}

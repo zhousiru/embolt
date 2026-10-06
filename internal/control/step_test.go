@@ -51,8 +51,17 @@ func record(stats *measure.Stats, n *nodes.Node, age time.Duration, mbps ...floa
 	}
 }
 
+// step runs s's step as if stepGap passed since the last, so a deficit
+// accrues as it does between real steps.
+func step(s *Stream, o Observation) (*nodes.Node, string) {
+	if !s.stepped.IsZero() {
+		s.stepped = s.stepped.Add(-stepGap)
+	}
+	return s.Step(o)
+}
+
 // behind is an observation of a read-ahead of secs seconds on a node
-// delivering under the session's bitrate.
+// delivering almost nothing: each step adds most of stepGap to the deficit.
 func behind(secs float64) Observation {
 	return Observation{ReadAhead: time.Duration(secs * float64(time.Second)), Fetched: 1}
 }
@@ -87,12 +96,12 @@ func TestStepMovesWhenBehind(t *testing.T) {
 		t.Fatalf("media node %v, want a", s.Node())
 	}
 	for _, secs := range []float64{15, 14, 13} {
-		if got, why := s.Step(behind(secs)); got != nil {
+		if got, why := step(s, behind(secs)); got != nil {
 			t.Fatalf("a behind, the fastest node: Step = %v (%s), want stay", got, why)
 		}
 	}
 	record(c.stats, n["a"], 0, 5, 5, 5) // a sags under b
-	if got, why := s.Step(behind(12)); got != n["b"] || why != "risk" {
+	if got, why := step(s, behind(12)); got != n["b"] || why != "risk" {
 		t.Errorf("a sagging: Step = %v (%s), want a move to b for risk", got, why)
 	}
 }
@@ -111,11 +120,38 @@ func TestStepStaysWhileTheNodeKeepsUp(t *testing.T) {
 		{ReadAhead: 30 * time.Second, Fetched: 1},
 	} {
 		for range 3 {
-			if got, _ := s.Step(o); got != nil || s.state != "ok" {
+			if got, _ := step(s, o); got != nil || s.state != "ok" {
 				t.Errorf("%+v: Step = %v, state %q; want stay, ok", o, got, s.state)
 			}
 		}
 	}
+}
+
+// TestStepRidesOutNoise: a node that delivers the bitrate on average, in
+// steps that swing far under and over it, never falls behind.
+func TestStepRidesOutNoise(t *testing.T) {
+	c, n := testController(t, map[string][]float64{"a": {100}, "b": {50}})
+	s, _ := c.Play("tv/1", 22)
+	record(c.stats, n["a"], 0, 1, 1, 1) // b is faster on paper: only the rule holds the session
+	for i := range 30 {
+		mbps := 34.0
+		if i%2 == 0 {
+			mbps = 10
+		}
+		if got, _ := step(s, Observation{Fetched: mbps}); got != nil || s.state != "ok" {
+			t.Fatalf("step %d at %v Mbps: Step = %v, state %q, deficit %v; want stay, ok", i, mbps, got, s.state, s.deficit)
+		}
+	}
+	// Under the bitrate for good, it falls behind and moves.
+	for range 4 {
+		if got, _ := step(s, Observation{Fetched: 10}); got != nil {
+			if got != n["b"] {
+				t.Errorf("behind: moved to %v, want b", got)
+			}
+			return
+		}
+	}
+	t.Errorf("a node at 10 Mbps for 8 s on a 22 Mbps file: still there, deficit %v", s.deficit)
 }
 
 func TestOnlyTheLeadStreamDecides(t *testing.T) {
@@ -126,7 +162,7 @@ func TestOnlyTheLeadStreamDecides(t *testing.T) {
 	}
 	scan, _ := c.Play("tv/1", 22)
 	record(c.stats, n["a"], 0, 1, 1, 1)
-	play.Step(Observation{ReadAhead: 30 * time.Second, Played: 1e6, Fetched: 22})
+	step(play, Observation{ReadAhead: 30 * time.Second, Played: 1e6, Fetched: 22})
 	// The scan reads a little, slowly: alone it would look behind.
 	for range 3 {
 		if got, _ := scan.Step(Observation{ReadAhead: time.Second, Played: 1e3, Fetched: 1}); got != nil {
@@ -134,8 +170,8 @@ func TestOnlyTheLeadStreamDecides(t *testing.T) {
 		}
 	}
 	// The same on the lead stream does move the session.
-	play.Step(Observation{ReadAhead: time.Second, Played: 1e6, Fetched: 1})
-	if got, _ := play.Step(Observation{ReadAhead: time.Second, Played: 1e6, Fetched: 1}); got != n["b"] {
+	step(play, Observation{ReadAhead: time.Second, Played: 1e6, Fetched: 1})
+	if got, _ := step(play, Observation{ReadAhead: time.Second, Played: 1e6, Fetched: 1}); got != n["b"] {
 		t.Errorf("lead stream behind: Step = %v, want a switch to b", got)
 	}
 }
@@ -154,7 +190,7 @@ func TestStepDoesNotReturnToANodeItJustLeft(t *testing.T) {
 		t.Fatalf("media node %v, want a, the faster of late", s.Node())
 	}
 	for _, secs := range []float64{19, 18, 17} {
-		if got, why := s.Step(behind(secs)); got != nil {
+		if got, why := step(s, behind(secs)); got != nil {
 			t.Errorf("Step = %v (%s), want stay: b sagged half a minute ago", got, why)
 		}
 	}
@@ -165,12 +201,15 @@ func TestStepWaitsAfterASwitch(t *testing.T) {
 	s, _ := c.Play("tv/1", 22)
 	s.Switched(n["c"], "stall")
 	for _, secs := range []float64{3, 2, 1} {
-		if got, _ := s.Step(behind(secs)); got != nil {
+		if got, _ := step(s, behind(secs)); got != nil {
 			t.Errorf("moments after a switch: Step = %v, want stay", got)
 		}
 	}
 	s.switched = s.switched.Add(-minSwitchGap)
-	if got, _ := s.Step(behind(1)); got != n["a"] {
+	if got, _ := step(s, behind(1)); got != nil {
+		t.Errorf("one step after the switch settled: Step = %v, want stay: the deficit starts afresh", got)
+	}
+	if got, _ := step(s, behind(1)); got != n["a"] {
 		t.Errorf("once the switch settled: Step = %v, want a, the fastest", got)
 	}
 }
@@ -238,32 +277,33 @@ func TestPrimaryMovesOnlyWhenQuickerAndIdle(t *testing.T) {
 // TestSessionShowsItsSteps: the session view shows the last step, keeps the
 // steps for the chart, and outlives the session once it ends.
 func TestSessionShowsItsSteps(t *testing.T) {
-	const stepGap = 2 * time.Second
 	c, _ := testController(t, map[string][]float64{"a": {500}, "b": {110}})
 	s, _ := c.Play("tv/1", 22.2)
 	if st := c.Session("tv/1").Session.State; st != "starting" {
 		t.Errorf("before a step: state %q, want starting", st)
 	}
-	s.Step(Observation{ReadAhead: 30 * time.Second, Full: true, Fetched: 40})
+	step(s, Observation{ReadAhead: 30 * time.Second, Full: true, Fetched: 40})
 	d := c.Session("tv/1")
 	if d.Session.State != "ok" || d.Session.FetchedMbps != 40 || d.Session.NodeMbps != 500 ||
 		len(d.History) != 1 || d.History[0].Ahead != 30 {
 		t.Fatalf("full read-ahead: %+v, history %+v", d.Session, d.History)
 	}
 
-	s.Step(behind(15))
+	step(s, behind(15))
+	if st := c.Session("tv/1").Session.State; st != "ok" {
+		t.Errorf("one step short: state %q, want ok", st)
+	}
+	step(s, behind(15))
 	if st := c.Session("tv/1").Session.State; st != "risk" {
 		t.Errorf("behind: state %q, want risk", st)
 	}
-	c.plays["tv/1"].stepped = time.Now().Add(-stepGap)
-	s.Step(behind(1))
-	if d := c.Session("tv/1"); d.Session.State != "low" || d.Session.LowSeconds < stepGap.Seconds() || len(d.History) != 3 {
+	step(s, behind(1))
+	if d := c.Session("tv/1"); d.Session.State != "low" || d.Session.LowSeconds < stepGap.Seconds() || len(d.History) != 4 {
 		t.Errorf("behind under the low mark: %+v, want low", d.Session)
 	}
-	c.plays["tv/1"].stepped = time.Now().Add(-stepGap)
-	s.Step(Observation{ReadAhead: time.Second, Fetched: 40})
+	step(s, Observation{ReadAhead: 30 * time.Second, Fetched: 40})
 	if d := c.Session("tv/1"); d.Session.State != "ok" || d.Session.LowSeconds >= 2*stepGap.Seconds() {
-		t.Errorf("keeping up under the low mark: %+v, want ok, low unchanged", d.Session)
+		t.Errorf("a long read-ahead again: %+v, want ok, low unchanged", d.Session)
 	}
 
 	s.Release()
@@ -275,7 +315,7 @@ func TestSessionShowsItsSteps(t *testing.T) {
 	if r := c.Recent(); len(r) != 1 || r[0].Key != "tv/1" || r[0].State != "ended" || r[0].Ended.IsZero() {
 		t.Fatalf("recent %+v, want tv/1 ended", r)
 	}
-	if d := c.Session("tv/1"); d.Session == nil || d.Session.State != "ended" || len(d.History) != 4 {
+	if d := c.Session("tv/1"); d.Session == nil || d.Session.State != "ended" || len(d.History) != 5 {
 		t.Errorf("an ended session: %+v", d)
 	}
 	if c.Session("tv/2").Session != nil {
@@ -375,11 +415,11 @@ func TestMigratesToAFarFasterNode(t *testing.T) {
 			}
 			record(c.stats, n["b"], tc.age, tc.mbps)
 			full := Observation{ReadAhead: time.Minute, Full: true}
-			if got, _ := s.Step(full); got != nil {
+			if got, _ := step(s, full); got != nil {
 				t.Fatalf("moved to %v moments after play started", got)
 			}
 			s.started = s.started.Add(-migrateGap)
-			got, why := s.Step(full)
+			got, why := step(s, full)
 			switch {
 			case tc.moves && (got != n["b"] || why != "faster"):
 				t.Errorf("Step = %v (%s), want a move to b for speed", got, why)

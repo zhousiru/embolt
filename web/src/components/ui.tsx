@@ -67,7 +67,7 @@ export const Role = ({ role }: { role: string }) => <Badge tone="accent">{role}<
 const states: Record<string, { label: string; tone: keyof typeof tones; title: string }> = {
   starting: { label: 'Starting', tone: 'accent', title: 'Opening its stream' },
   ok: { label: 'Smooth', tone: 'good', title: 'Its node delivers the bitrate, or the read-ahead holds' },
-  risk: { label: 'Behind', tone: 'warn', title: 'Its node delivers under the bitrate and the read-ahead is running down' },
+  risk: { label: 'Behind', tone: 'warn', title: 'Its node has fallen 3 s of media short of the bitrate while the read-ahead was thin' },
   low: { label: 'Draining', tone: 'bad', title: 'Behind with the read-ahead under the low mark: the player is on its own buffer' },
   idle: { label: 'Idle', tone: 'neutral', title: 'No stream open' },
   ended: { label: 'Ended', tone: 'neutral', title: '' },

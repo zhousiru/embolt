@@ -55,10 +55,12 @@ player holds: a read-ahead that runs out is not a stall, but a node
 delivering under the bitrate drains the player. Every 2 s, each session:
 
 1. stays for 20 s after a switch;
-2. moves to the fastest other node when it has been *behind* for two steps
-   in a row, its read-ahead under 20 s and not filling while upstream
-   delivered under the bitrate, unless that node is no faster than its own:
-   then the server, not the node, is slow;
+2. moves to the fastest other node when its node has fallen *behind*:
+   while the read-ahead was under 20 s and not filling, upstream delivered
+   3 s of media less than the bitrate calls for, net of what it delivered
+   over, unless that node is no faster than its own: then the server, not
+   the node, is slow. One step's rate swings widely; the shortfall counts
+   only as it adds up. A full or long read-ahead, or a switch, clears it;
 3. once on its node for 5 min, moves for speed alone to a node measured in
    the last 30 min at 1.5× its own node's rate;
 4. else stays.
@@ -86,8 +88,8 @@ shows the strategy at work:
 | Message | When | Says |
 | --- | --- | --- |
 | `playback started` | a session starts | its node, why, and the fastest nodes as `node Mbps` |
-| `session` | every 30 s while it stays | read-ahead, whether it filled, what upstream delivered, its node's rate, verdict |
-| `move` | a step decides to switch | `reason` risk or faster, why, read-ahead, what upstream delivered, the fastest others |
+| `session` | every 30 s while it stays | read-ahead, deficit, whether it filled, what upstream delivered, its node's rate, verdict |
+| `move` | a step decides to switch | `reason` risk or faster, why, read-ahead, deficit, what upstream delivered, the fastest others |
 | `switched` | a feed reconnects on another node | `reason` risk, faster, stall or error, read-ahead, both nodes' rates |
 | `explore` / `explored` | a speed test starts / ends | the node, why it was tested, what it delivered, its rate after |
 | `primary switched` | the primary changes | burst times of both |
