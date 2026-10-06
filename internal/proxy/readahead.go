@@ -89,10 +89,8 @@ type span struct {
 	end    int64 // last byte the feed reads, -1 until known
 
 	readers  map[*reader]struct{}
-	marks    []mark // where readers left, within keepIdle
-	reach    int64  // furthest byte handed to a player
-	opened   time.Time
-	start    int64       // the first byte a player asked of the span
+	marks    []mark      // where readers left, within keepIdle
+	reach    int64       // furthest byte handed to a player
 	recent   float64     // bytes handed to players, decaying over mainDecay
 	recentAt time.Time   // when bytes were last handed, or the span opened
 	idle     *time.Timer // drops the span once it has had no reader for keepIdle
@@ -170,8 +168,8 @@ func (f *file) open(rd *reader) *span {
 		}
 	}
 	now := time.Now()
-	sp := &span{f: f, total: -1, start: rd.pos, from: rd.pos, to: rd.pos, end: -1, reach: rd.pos,
-		readers: map[*reader]struct{}{}, opened: now, recentAt: now, wake: make(chan struct{})}
+	sp := &span{f: f, total: -1, from: rd.pos, to: rd.pos, end: -1, reach: rd.pos,
+		readers: map[*reader]struct{}{}, recentAt: now, wake: make(chan struct{})}
 	f.spans = append(f.spans, sp)
 	sp.attach(rd)
 	return sp
@@ -446,8 +444,8 @@ const maxAhead = 2 * time.Minute
 // stored apart from its video, plays a small share of its bytes, and its few
 // megabytes last minutes. It is the shortest of the regions still fetching,
 // since the player stalls when any runs dry, and at most maxAhead, which
-// is plenty: a file fully fetched reports that. Delivery is the main read's alone, so that a seek starts
-// the bound on the player's buffer afresh.
+// is plenty: a file fully fetched reports that. Played is what the regions
+// being played delivered lately, which picks the lead among a session's files.
 func (f *file) observe(now time.Time) (control.Observation, *span) {
 	main, total := f.lead(now)
 	if main == nil {
@@ -468,14 +466,8 @@ func (f *file) observe(now time.Time) (control.Observation, *span) {
 	}
 	return control.Observation{
 		ReadAhead: time.Duration(secs * float64(time.Second)),
-		Delivered: f.media(main.reach - main.start),
-		Elapsed:   now.Sub(main.opened),
+		Played:    total,
 	}, main
-}
-
-// media converts bytes of the file to seconds of playback at its bitrate.
-func (f *file) media(bytes int64) time.Duration {
-	return time.Duration(float64(bytes) * 8 / (f.bitrate * 1e6) * float64(time.Second))
 }
 
 // supervise runs the controller step for the file every 2 s while a region

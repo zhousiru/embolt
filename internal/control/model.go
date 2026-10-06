@@ -10,8 +10,9 @@ import (
 	"github.com/zhousiru/embolt/internal/nodes"
 )
 
-// BufferMin is the low mark: a buffer under it is about to stall.
-const BufferMin = 10 * time.Second
+// LowMark is the low mark: a session behind with a read-ahead under it is
+// draining its player, which has only its own buffer left.
+const LowMark = 10 * time.Second
 
 // The primary is judged on a control burst: a library page of images, about
 // 3 MB over a few round trips. RTT alone would pick a node that answers 40 ms

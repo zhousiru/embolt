@@ -16,7 +16,7 @@ import (
 
 const (
 	minSwitchGap = 20 * time.Second // after a switch, before the next
-	riskBuffer   = 20 * time.Second // a buffer under this that stops growing...
+	riskAhead    = 20 * time.Second // a read-ahead under this, on a node behind the bitrate...
 	riskSteps    = 2                // ...for this many steps in a row moves the session
 	headroom     = 1.2              // over the bitrate, for the primary to take a new session
 	migrateGap   = 5 * time.Minute  // the least time on a node before a move for speed
@@ -34,7 +34,9 @@ const (
 )
 
 // Playback is one viewing session: one device watching one item. It holds
-// the media node and the controller's view of the buffer.
+// the media node and the controller's view of the read-ahead. The player's
+// own buffer is unknown and never guessed at: a read-ahead that runs out
+// is not a stall, but a node behind the bitrate drains the player.
 // Seeks and the player's side connections join the same Playback, so the
 // session keeps one exit IP.
 // A playback lasts while it has a stream: a file it reads from upstream,
@@ -54,16 +56,15 @@ type Playback struct {
 	streams   map[*Stream]struct{}
 	viewers   int // player connections
 	idle      time.Time
-	buffer    time.Duration
+	ahead     time.Duration
 	full      bool // the read-ahead filled since the last step
-	short     int  // steps in a row the buffer was under riskBuffer and did not grow
+	short     int  // steps in a row the session was behind
 	logged    time.Time
 
 	// What the pane shows, as of the last step.
 	state   string        // starting, ok, risk or low
 	fetched float64       // Mbps read from upstream over the last step
-	primed  bool          // the buffer has passed the low mark
-	low     time.Duration // under the low mark since
+	low     time.Duration // behind with the read-ahead under the low mark
 	stepped time.Time
 	history []view.Point // the last historyLen steps
 }
@@ -75,22 +76,23 @@ const historyLen = 300
 // observation covers every region the player reads.
 type Stream struct {
 	*Playback
-	delivered time.Duration // media handed to players; guarded by c.mu
+	played float64 // bytes handed to players lately; guarded by c.mu
 }
 
 // Observation is what a stream reports at each step.
 type Observation struct {
 	ReadAhead time.Duration // media in Embolt's read-ahead
-	Delivered time.Duration // media handed to players since the stream opened
-	Elapsed   time.Duration // since the stream opened
+	Played    float64       // bytes handed to players lately, decaying
 	Full      bool          // the read-ahead filled since the last step
 	Fetched   float64       // Mbps read from upstream since the last step
 }
 
-// buffer is the media ahead of playback: the read-ahead plus a lower bound
-// on the player's own buffer. Startup and pauses only lower the bound.
-func (o Observation) buffer() time.Duration {
-	return o.ReadAhead + max(0, o.Delivered-o.Elapsed)
+// behind reports whether the node is draining the player: the read-ahead is
+// under riskAhead and not filling, and upstream delivered under the bitrate.
+// A player filling its own buffer after a start or a seek takes all it is
+// handed, so the read-ahead alone says nothing; the rate does.
+func (o Observation) behind(bitrate float64) bool {
+	return !o.Full && o.ReadAhead < riskAhead && o.Fetched < bitrate
 }
 
 // Play joins or starts the session key with a new stream. bitrate is in
@@ -142,10 +144,10 @@ func (s *Stream) Release() {
 	}
 }
 
-// leads reports whether s drives the session: it has delivered the most.
+// leads reports whether s drives the session: it delivered the most lately.
 func (s *Stream) leads() bool {
 	for o := range s.streams {
-		if o.delivered > s.delivered {
+		if o.played > s.played {
 			return false
 		}
 	}
@@ -195,16 +197,15 @@ func (s *Stream) Step(o Observation) (*nodes.Node, string) {
 	p, c := s.Playback, s.c
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if s.delivered = o.Delivered; !s.leads() {
+	if s.played = o.Played; !s.leads() {
 		return nil, ""
 	}
 	now := time.Now()
-	prev := p.buffer
-	p.buffer, p.full = o.buffer(), o.Full
-	if p.full || p.buffer >= riskBuffer || p.buffer > prev {
-		p.short = 0
-	} else {
+	p.ahead, p.full = o.ReadAhead, o.Full
+	if o.behind(p.bitrate) {
 		p.short++
+	} else {
+		p.short = 0
 	}
 	to, why, faster := c.decide(p, now)
 	p.record(o, now)
@@ -212,8 +213,9 @@ func (s *Stream) Step(o Observation) (*nodes.Node, string) {
 	if to == nil {
 		if now.Sub(p.logged) >= logEvery {
 			p.logged = now
-			slog.Info("session", "session", p.key, "media", p.node.Name, "buffer_s", round1(p.buffer.Seconds()),
-				"full", p.full, "node_mbps", mbpsLog(rate), "bitrate_mbps", round1(p.bitrate), "verdict", why)
+			slog.Info("session", "session", p.key, "media", p.node.Name, "ahead_s", round1(p.ahead.Seconds()),
+				"full", p.full, "fetched_mbps", round1(o.Fetched), "node_mbps", mbpsLog(rate),
+				"bitrate_mbps", round1(p.bitrate), "verdict", why)
 		}
 		return nil, ""
 	}
@@ -222,21 +224,18 @@ func (s *Stream) Step(o Observation) (*nodes.Node, string) {
 		reason = "faster"
 	}
 	slog.Info("move", "session", p.key, "from", p.node.Name, "to", to.Name, "reason", reason, "why", why,
-		"buffer_s", round1(p.buffer.Seconds()), "bitrate_mbps", round1(p.bitrate), "node_mbps", mbpsLog(rate),
-		"options", top(c.rank(c.usable(other(p.node)))))
+		"ahead_s", round1(p.ahead.Seconds()), "fetched_mbps", round1(o.Fetched), "bitrate_mbps", round1(p.bitrate),
+		"node_mbps", mbpsLog(rate), "options", top(c.rank(c.usable(other(p.node)))))
 	return to, reason
 }
 
 // record keeps what the step saw for the pane.
 func (p *Playback) record(o Observation, now time.Time) {
-	under := p.buffer < BufferMin
-	if p.primed && under && !p.stepped.IsZero() {
+	under := p.short > 0 && p.ahead < LowMark
+	if under && !p.stepped.IsZero() {
 		p.low += now.Sub(p.stepped)
 	}
-	p.primed = p.primed || !under
 	switch {
-	case !p.primed:
-		p.state = "starting"
 	case under:
 		p.state = "low"
 	case p.short > 0:
@@ -248,15 +247,15 @@ func (p *Playback) record(o Observation, now time.Time) {
 	if len(p.history) == historyLen {
 		p.history = slices.Delete(p.history, 0, 1)
 	}
-	p.history = append(p.history, view.Point{At: now, Buffer: p.buffer.Seconds(), Mbps: o.Fetched})
+	p.history = append(p.history, view.Point{At: now, Ahead: p.ahead.Seconds(), Mbps: o.Fetched})
 }
 
 // decide moves a session, or keeps it, and says why:
 //
 //  1. Stay on a pinned node, or on one switched to moments ago.
-//  2. When the buffer is under riskBuffer and has not grown for riskSteps
-//     steps, move to the fastest other node, unless it is no faster than
-//     the media node: then the server, not the node, is slow.
+//  2. When the session has been behind for riskSteps steps, move to the
+//     fastest other node, unless it is no faster than the media node: then
+//     the server, not the node, is slow.
 //  3. When the session has been on its node for migrateGap and keeps up,
 //     move to a node whose fresh rate is migrateGain times the media
 //     node's.
@@ -273,7 +272,7 @@ func (c *Controller) decide(p *Playback, now time.Time) (to *nodes.Node, why str
 	case p.short >= riskSteps:
 		return c.rescue(p)
 	case p.short > 0:
-		return nil, "buffer low", false
+		return nil, "behind", false
 	case now.Sub(p.started) < migrateGap || now.Sub(p.switched) < migrateGap:
 		return nil, "keeps up", false
 	}
@@ -289,18 +288,18 @@ func (c *Controller) decide(p *Playback, now time.Time) (to *nodes.Node, why str
 	return nil, "keeps up", false
 }
 
-// rescue moves a session whose buffer runs down to the fastest other node,
-// unless that node is no faster than its own.
+// rescue moves a session that is behind to the fastest other node, unless
+// that node is no faster than its own.
 func (c *Controller) rescue(p *Playback) (*nodes.Node, string, bool) {
 	r := c.rank(c.usable(other(p.node)))
 	cur := c.stats.State(p.node)
 	switch {
 	case len(r) == 0:
-		return nil, "buffer running down; no other usable node", false
+		return nil, "behind; no other usable node", false
 	case cur.Rate.Measured() && faster(r[0].st, cur) >= 0:
-		return nil, "buffer running down; no faster node", false
+		return nil, "behind; no faster node", false
 	}
-	return r[0].n, "buffer running down", false
+	return r[0].n, "behind", false
 }
 
 // other keeps every node but n.
@@ -382,7 +381,7 @@ func (p *Playback) Switched(n *nodes.Node, reason string) {
 	defer c.mu.Unlock()
 	p.failovers++
 	slog.Info("switched", "session", p.key, "from", p.node.Name, "to", n.Name, "reason", reason,
-		"buffer_s", round1(p.buffer.Seconds()), "from_mbps", mbpsLog(c.stats.State(p.node).Rate),
+		"ahead_s", round1(p.ahead.Seconds()), "from_mbps", mbpsLog(c.stats.State(p.node).Rate),
 		"to_mbps", mbpsLog(c.stats.State(n).Rate), "bitrate_mbps", round1(p.bitrate), "failovers", p.failovers)
 	failovers.WithLabelValues(reason).Inc()
 	p.node = n

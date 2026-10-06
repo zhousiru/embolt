@@ -45,7 +45,7 @@ function SessionDetail() {
           {s.ended ? (
             <Stat label="Length">{length(s)}</Stat>
           ) : (
-            <Stat label="Buffer">{s.bufferSeconds.toFixed(0)} s</Stat>
+            <Stat label="Read-ahead">{s.aheadSeconds.toFixed(0)} s</Stat>
           )}
           {!s.ended && (
             <Stat label="Fetched">
@@ -57,7 +57,7 @@ function SessionDetail() {
             <NodeLink {...s.media} />
           </Stat>
           <Stat label="Failovers">{s.failovers}</Stat>
-          <Stat label="Low buffer">
+          <Stat label="Draining">
             {s.lowSeconds >= 1 ? <span className="text-rose-600 dark:text-rose-400">{duration(s.lowSeconds)}</span> : '—'}
           </Stat>
         </Stats>

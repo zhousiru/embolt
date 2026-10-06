@@ -76,17 +76,17 @@ func (c *Controller) sessionView(p *Playback) view.Session {
 		state = "idle"
 	}
 	v := view.Session{
-		Key:           p.key,
-		State:         state,
-		Media:         ref(p.node),
-		Players:       p.viewers,
-		BitrateMbps:   p.bitrate,
-		BufferSeconds: p.buffer.Seconds(),
-		FetchedMbps:   p.fetched,
-		Failovers:     p.failovers,
-		Tests:         p.tests,
-		LowSeconds:    p.low.Seconds(),
-		Started:       p.started,
+		Key:          p.key,
+		State:        state,
+		Media:        ref(p.node),
+		Players:      p.viewers,
+		BitrateMbps:  p.bitrate,
+		AheadSeconds: p.ahead.Seconds(),
+		FetchedMbps:  p.fetched,
+		Failovers:    p.failovers,
+		Tests:        p.tests,
+		LowSeconds:   p.low.Seconds(),
+		Started:      p.started,
 	}
 	if r := c.stats.State(p.node).Rate; r.Measured() {
 		v.NodeMbps = r.Value
@@ -127,7 +127,7 @@ func (c *Controller) PrimaryRef() *view.NodeRef {
 func (c *Controller) Limits() view.Limits {
 	k := c.cfg.Load().Control
 	return view.Limits{
-		BufferMinSeconds: BufferMin.Seconds(),
+		LowMarkSeconds:   LowMark.Seconds(),
 		ReadAheadSeconds: k.ReadAhead.Seconds(),
 	}
 }

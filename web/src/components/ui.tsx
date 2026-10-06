@@ -65,10 +65,10 @@ export function Badge({ tone = 'neutral', title, children }: { tone?: keyof type
 export const Role = ({ role }: { role: string }) => <Badge tone="accent">{role}</Badge>
 
 const states: Record<string, { label: string; tone: keyof typeof tones; title: string }> = {
-  starting: { label: 'Starting', tone: 'accent', title: 'Filling the buffer for the first time' },
-  ok: { label: 'Smooth', tone: 'good', title: 'Its node keeps the buffer up' },
-  risk: { label: 'At risk', tone: 'warn', title: 'Its node may not keep the buffer up' },
-  low: { label: 'Low buffer', tone: 'bad', title: 'Under the low mark: the player may stall' },
+  starting: { label: 'Starting', tone: 'accent', title: 'Opening its stream' },
+  ok: { label: 'Smooth', tone: 'good', title: 'Its node delivers the bitrate, or the read-ahead holds' },
+  risk: { label: 'Behind', tone: 'warn', title: 'Its node delivers under the bitrate and the read-ahead is running down' },
+  low: { label: 'Draining', tone: 'bad', title: 'Behind with the read-ahead under the low mark: the player is on its own buffer' },
   idle: { label: 'Idle', tone: 'neutral', title: 'No stream open' },
   ended: { label: 'Ended', tone: 'neutral', title: '' },
 }
@@ -110,15 +110,15 @@ export function RateBar({ e, scale }: { e: Estimate; scale: number }) {
   )
 }
 
-/** Seconds buffered against the read-ahead's length, with the low mark. */
-export function Buffer({ seconds, limits }: { seconds: number; limits: Limits }) {
+/** Seconds of read-ahead against its length, with the low mark; red while the session is behind. */
+export function Ahead({ seconds, behind, limits }: { seconds: number; behind: boolean; limits: Limits }) {
   const max = limits.readAheadSeconds
-  const low = limits.bufferMinSeconds
+  const low = limits.lowMarkSeconds
   return (
     <div className="flex items-center gap-3">
       <div className="relative h-1.5 w-full min-w-20 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
         <div
-          className={`h-full rounded-full transition-[width] duration-700 ease-out ${seconds < low ? 'bg-rose-500' : 'bg-emerald-500'}`}
+          className={`h-full rounded-full transition-[width] duration-700 ease-out ${behind ? 'bg-rose-500' : 'bg-emerald-500'}`}
           style={{ width: `${Math.min(seconds / max, 1) * 100}%` }}
         />
         <div className="absolute inset-y-0 w-px bg-zinc-400/70" style={{ left: `${(low / max) * 100}%` }} />

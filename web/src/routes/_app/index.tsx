@@ -86,7 +86,7 @@ function PlayingCard({ s, limits }: { s: Session; limits: Limits }) {
         <SessionChart history={d?.history ?? []} events={d?.events} limits={limits} bitrate={s.bitrateMbps} compact />
       </div>
       <dl className="mt-3 grid grid-cols-3 gap-3 text-sm tabular-nums">
-        <Figure label="Buffer">{s.bufferSeconds.toFixed(0)} s</Figure>
+        <Figure label="Read-ahead">{s.aheadSeconds.toFixed(0)} s</Figure>
         <Figure label="Fetched">
           {s.fetchedMbps.toFixed(1)}
           <span className="text-zinc-400"> / {s.bitrateMbps.toFixed(0)} Mbps</span>

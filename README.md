@@ -13,7 +13,7 @@ through the [mihomo](https://github.com/metacubex/mihomo) node best suited to it
 
 Nodes rank themselves from real traffic to your Emby server. One controller
 keeps each session on its node while the buffer holds, and moves it when the
-buffer runs down, or when a speed test finds a node far faster, so each
+node falls behind the bitrate, or when a speed test finds a node far faster, so each
 playback reads through one exit IP for long stretches, plus a second for the
 few seconds of a speed test.
 
@@ -30,7 +30,7 @@ docker compose up -d                        # edit compose.yaml's OWNER first
 
 Point your Emby apps at `http://<host>:8096` instead of the server. The pane
 is on `http://<host>:9090`: what is playing, each session's last 10 minutes of
-buffer and rate with its switches and speed tests, the last day's sessions,
+read-ahead and rate with its switches and speed tests, the last day's sessions,
 and every node's estimates. It is read-only and never shows a secret; to
 change anything, edit the config, which reloads by itself.
 
@@ -50,12 +50,15 @@ node measured.
 
 A session starts on the primary when the primary's rate is 1.2× the
 bitrate, so browsing and playback share one exit IP; else on the fastest
-node. Every 2 s, each session:
+node. Embolt judges only its own read-ahead and never guesses what the
+player holds: a read-ahead that runs out is not a stall, but a node
+delivering under the bitrate drains the player. Every 2 s, each session:
 
 1. stays for 20 s after a switch;
-2. moves to the fastest other node when its buffer is under 20 s and has
-   not grown for two steps in a row, unless that node is no faster than its
-   own: then the server, not the node, is slow;
+2. moves to the fastest other node when it has been *behind* for two steps
+   in a row, its read-ahead under 20 s and not filling while upstream
+   delivered under the bitrate, unless that node is no faster than its own:
+   then the server, not the node, is slow;
 3. once on its node for 5 min, moves for speed alone to a node measured in
    the last 30 min at 1.5× its own node's rate;
 4. else stays.
@@ -83,9 +86,9 @@ shows the strategy at work:
 | Message | When | Says |
 | --- | --- | --- |
 | `playback started` | a session starts | its node, why, and the fastest nodes as `node Mbps` |
-| `session` | every 30 s while it stays | buffer, whether the read-ahead filled, its node's rate, verdict |
-| `move` | a step decides to switch | `reason` risk or faster, why, buffer, its node's rate, the fastest others |
-| `switched` | a feed reconnects on another node | `reason` risk, faster, stall or error, buffer, both nodes' rates |
+| `session` | every 30 s while it stays | read-ahead, whether it filled, what upstream delivered, its node's rate, verdict |
+| `move` | a step decides to switch | `reason` risk or faster, why, read-ahead, what upstream delivered, the fastest others |
+| `switched` | a feed reconnects on another node | `reason` risk, faster, stall or error, read-ahead, both nodes' rates |
 | `explore` / `explored` | a speed test starts / ends | the node, why it was tested, what it delivered, its rate after |
 | `primary switched` | the primary changes | burst times of both |
 | `pinged` | each ping round | nodes, how many answered |

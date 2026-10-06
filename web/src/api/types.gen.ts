@@ -26,7 +26,7 @@ export interface Status {
  * Limits are the control settings the pane draws against.
  */
 export interface Limits {
-  bufferMinSeconds: number /* float64 */;
+  lowMarkSeconds: number /* float64 */;
   readAheadSeconds: number /* float64 */;
 }
 export interface NodeRef {
@@ -42,12 +42,12 @@ export interface Session {
   media: NodeRef;
   players: number /* int */; // open player connections
   bitrateMbps: number /* float64 */;
-  bufferSeconds: number /* float64 */; // read-ahead plus a lower bound on the player's own
+  aheadSeconds: number /* float64 */; // media in Embolt's read-ahead
   fetchedMbps: number /* float64 */; // read from upstream over the last step
   nodeMbps: number /* float64 */; // the media node's average rate, 0 if not measured
   failovers: number /* int */;
   tests: number /* int */;
-  lowSeconds: number /* float64 */; // under the low mark, once first over it
+  lowSeconds: number /* float64 */; // behind with the read-ahead under the low mark
   started: string;
   ended?: string;
   item?: Item; // unknown until a player fetches the item's details
@@ -80,7 +80,7 @@ export interface SessionDetail {
  */
 export interface Point {
   at: string;
-  buffer: number /* float64 */; // s
+  ahead: number /* float64 */; // s of read-ahead
   mbps: number /* float64 */; // fetched
 }
 /**

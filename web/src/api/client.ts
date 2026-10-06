@@ -78,6 +78,6 @@ export const useNode = (id: string) => usePoll<NodeDetail>(`nodes/${encodeURICom
 export const useSession = (key: string) => usePoll<SessionDetail>(`sessions/${encodeURIComponent(key)}`)
 export const useEvents = () => usePoll<Event[]>('events')
 
-const defaultLimits: Limits = { bufferMinSeconds: 10, readAheadSeconds: 60 }
+const defaultLimits: Limits = { lowMarkSeconds: 10, readAheadSeconds: 60 }
 
 export const useLimits = () => useStatus().data?.limits ?? defaultLimits

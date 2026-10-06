@@ -1,5 +1,5 @@
 import type { Limits, Session } from '#/api/types.gen'
-import { Ago, Buffer, NodeLink, SessionName, State, Table, duration, length, td } from './ui'
+import { Ago, Ahead, NodeLink, SessionName, State, Table, duration, length, td } from './ui'
 
 const quiet = <span className="text-zinc-400">—</span>
 
@@ -7,7 +7,7 @@ const quiet = <span className="text-zinc-400">—</span>
 export function SessionTable({ sessions, limits }: { sessions: Session[]; limits: Limits }) {
   const ended = sessions.length > 0 && sessions.every((s) => s.ended)
   return (
-    <Table head={['Session', ended ? 'Ended' : 'State', 'Node', ...(ended ? [] : ['Buffer']), 'Length', 'Failovers', 'Low buffer']}>
+    <Table head={['Session', ended ? 'Ended' : 'State', 'Node', ...(ended ? [] : ['Read-ahead']), 'Length', 'Failovers', 'Draining']}>
       {sessions.map((s) => (
         <tr key={`${s.key}-${s.ended ?? ''}`}>
           <td className={`${td} max-w-80`}>
@@ -27,7 +27,7 @@ export function SessionTable({ sessions, limits }: { sessions: Session[]; limits
           </td>
           {!ended && (
             <td className={`${td} w-48`}>
-              <Buffer seconds={s.bufferSeconds} limits={limits} />
+              <Ahead seconds={s.aheadSeconds} behind={s.state === 'risk' || s.state === 'low'} limits={limits} />
             </td>
           )}
           <td className={td}>{length(s)}</td>

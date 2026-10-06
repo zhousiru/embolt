@@ -22,7 +22,7 @@ type Status struct {
 
 // Limits are the control settings the pane draws against.
 type Limits struct {
-	BufferMinSeconds float64 `json:"bufferMinSeconds"`
+	LowMarkSeconds   float64 `json:"lowMarkSeconds"`
 	ReadAheadSeconds float64 `json:"readAheadSeconds"`
 }
 
@@ -33,20 +33,20 @@ type NodeRef struct {
 
 // Session is one playback as of its controller's last step, or as it ended.
 type Session struct {
-	Key           string    `json:"key"`
-	State         string    `json:"state"` // starting, ok, risk, low, idle or ended
-	Media         NodeRef   `json:"media"`
-	Players       int       `json:"players"` // open player connections
-	BitrateMbps   float64   `json:"bitrateMbps"`
-	BufferSeconds float64   `json:"bufferSeconds"` // read-ahead plus a lower bound on the player's own
-	FetchedMbps   float64   `json:"fetchedMbps"`   // read from upstream over the last step
-	NodeMbps      float64   `json:"nodeMbps"`      // the media node's average rate, 0 if not measured
-	Failovers     int       `json:"failovers"`
-	Tests         int       `json:"tests"`
-	LowSeconds    float64   `json:"lowSeconds"` // under the low mark, once first over it
-	Started       time.Time `json:"started"`
-	Ended         time.Time `json:"ended,omitzero"`
-	Item          *Item     `json:"item,omitempty"` // unknown until a player fetches the item's details
+	Key          string    `json:"key"`
+	State        string    `json:"state"` // starting, ok, risk, low, idle or ended
+	Media        NodeRef   `json:"media"`
+	Players      int       `json:"players"` // open player connections
+	BitrateMbps  float64   `json:"bitrateMbps"`
+	AheadSeconds float64   `json:"aheadSeconds"` // media in Embolt's read-ahead
+	FetchedMbps  float64   `json:"fetchedMbps"`  // read from upstream over the last step
+	NodeMbps     float64   `json:"nodeMbps"`     // the media node's average rate, 0 if not measured
+	Failovers    int       `json:"failovers"`
+	Tests        int       `json:"tests"`
+	LowSeconds   float64   `json:"lowSeconds"` // behind with the read-ahead under the low mark
+	Started      time.Time `json:"started"`
+	Ended        time.Time `json:"ended,omitzero"`
+	Item         *Item     `json:"item,omitempty"` // unknown until a player fetches the item's details
 }
 
 // Item is what a session plays, as the player's own request for the item's
@@ -72,9 +72,9 @@ type SessionDetail struct {
 
 // Point is one step of a session.
 type Point struct {
-	At     time.Time `json:"at"`
-	Buffer float64   `json:"buffer"` // s
-	Mbps   float64   `json:"mbps"`   // fetched
+	At    time.Time `json:"at"`
+	Ahead float64   `json:"ahead"` // s of read-ahead
+	Mbps  float64   `json:"mbps"`  // fetched
 }
 
 // Estimate is a moving average of a node's measurements.

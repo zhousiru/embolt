@@ -64,7 +64,7 @@ function markers(events: Event[]): Marker[] {
 }
 
 /**
- * A session's last 10 minutes: the buffer against the low mark and, unless
+ * A session's last 10 minutes: the read-ahead against the low mark and, unless
  * compact, the rate fetched from upstream against the bitrate. Switches and
  * speed tests are marked; hovering reads off a step.
  */
@@ -96,10 +96,10 @@ export function SessionChart({
   const rateH = compact ? 0 : 64
   const height = compact ? bufH : rateTop + rateH + 20
 
-  const bufMax = nice(Math.max(limits.readAheadSeconds, ...pts.map((p) => p.buffer)))
+  const bufMax = nice(Math.max(limits.readAheadSeconds, ...pts.map((p) => p.ahead)))
   const rateMax = Math.max(bitrate * 1.5, ...pts.map((p) => p.mbps), 1) * 1.05
   const x = (p: Point | number) => left + ((typeof p === 'number' ? p : Date.parse(p.at)) - start) / span * w
-  const yBuf = (p: Point | number) => bufH - (Math.min(typeof p === 'number' ? p : p.buffer, bufMax) / bufMax) * (bufH - 2)
+  const yBuf = (p: Point | number) => bufH - (Math.min(typeof p === 'number' ? p : p.ahead, bufMax) / bufMax) * (bufH - 2)
   const yRate = (p: Point | number) => rateTop + rateH - ((typeof p === 'number' ? p : p.mbps) / rateMax) * rateH
 
   const at = hover === undefined ? undefined : pts[hover]
@@ -122,7 +122,7 @@ export function SessionChart({
           {!compact && (
             <g className="fill-zinc-400 text-[11px] tabular-nums dark:fill-zinc-500">
               <text x={0} y={10}>{bufMax} s</text>
-              <text x={0} y={yBuf(limits.bufferMinSeconds) + 4}>{limits.bufferMinSeconds} s</text>
+              <text x={0} y={yBuf(limits.lowMarkSeconds) + 4}>{limits.lowMarkSeconds} s</text>
               <text x={0} y={rateTop + 10}>{Math.round(rateMax)}</text>
               <text x={0} y={rateTop + 22}>Mbps</text>
               <text x={left} y={height - 2}>−10 min</text>
@@ -131,7 +131,7 @@ export function SessionChart({
             </g>
           )}
           <line x1={left} x2={left + w} y1={bufH} y2={bufH} className="stroke-zinc-200 dark:stroke-zinc-800" />
-          <line x1={left} x2={left + w} y1={yBuf(limits.bufferMinSeconds)} y2={yBuf(limits.bufferMinSeconds)} strokeDasharray="4 3" className="stroke-rose-400/70" />
+          <line x1={left} x2={left + w} y1={yBuf(limits.lowMarkSeconds)} y2={yBuf(limits.lowMarkSeconds)} strokeDasharray="4 3" className="stroke-rose-400/70" />
           <path d={area(pts, x, yBuf, bufH)} className="fill-sky-500/15" />
           <path d={line(pts, x, yBuf)} fill="none" strokeWidth={1.5} strokeLinejoin="round" className="stroke-sky-500" />
           {!compact && (
@@ -168,7 +168,7 @@ export function SessionChart({
         >
           <div className="text-zinc-500">{clock(at.at)}</div>
           <div>
-            <span className="text-sky-600 dark:text-sky-400">{at.buffer.toFixed(0)} s</span> buffered
+            <span className="text-sky-600 dark:text-sky-400">{at.ahead.toFixed(0)} s</span> ahead
           </div>
           <div>
             <span className="text-emerald-600 dark:text-emerald-400">{at.mbps.toFixed(1)} Mbps</span> fetched
@@ -191,7 +191,7 @@ export function ChartKey() {
   )
   return (
     <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500">
-      {item('h-0.5 w-3 rounded bg-sky-500', 'Buffer')}
+      {item('h-0.5 w-3 rounded bg-sky-500', 'Read-ahead')}
       {item('h-0.5 w-3 rounded bg-emerald-500', 'Fetched')}
       {item('w-3 border-t border-dashed border-zinc-400', 'Bitrate')}
       {item('w-3 border-t border-dashed border-rose-400', 'Low mark')}
