@@ -171,6 +171,48 @@ func TestWholeFileAndErrors(t *testing.T) {
 	}
 }
 
+// TestIfRange: a player resuming a read sends If-Range. When it names the
+// version the read-ahead holds, the span answers, and a second read shares
+// the first's fetch; when it names another version, the request goes to
+// upstream, which answers with the whole file.
+func TestIfRange(t *testing.T) {
+	file := randomFile(1 << 20)
+	upstream, reads := mediaUpstream(t, file)
+	px := newTestProxy(t, upstream.URL)
+	resume := func(first int, ifRange string) (*http.Response, []byte) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, px.URL+"/Videos/1/original.mp4?Static=true", nil)
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", first))
+		req.Header.Set("If-Range", ifRange)
+		req.Header.Set("X-Emby-Device-Id", "tv")
+		resp, err := http.DefaultTransport.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp, body
+	}
+
+	for _, first := range []int{1000, 2000} { // the first opens the span, the second joins it
+		resp, body := resume(first, `"v1"`)
+		if resp.StatusCode != http.StatusPartialContent || !bytes.Equal(body, file[first:]) {
+			t.Errorf("If-Range of the held version at %d: %d, %d bytes; want 206 from there", first, resp.StatusCode, len(body))
+		}
+	}
+	if n := reads.Load(); n != 1 {
+		t.Errorf("upstream saw %d reads, want 1: the second resume should come from the read-ahead", n)
+	}
+
+	resp, body := resume(3000, `"v0"`)
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(body, file) {
+		t.Errorf("If-Range of another version: %d, %d bytes; want 200 with the whole file", resp.StatusCode, len(body))
+	}
+	if n := reads.Load(); n != 2 {
+		t.Errorf("upstream saw %d reads, want 2: another version goes to upstream", n)
+	}
+}
+
 func TestParseRange(t *testing.T) {
 	for in, want := range map[string]struct {
 		first, last int64

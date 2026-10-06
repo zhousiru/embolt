@@ -539,8 +539,11 @@ func (s *Server) Close() {
 }
 
 // serveStatic answers a ranged read of a media file from a shared span,
-// opening one when no span can serve it. A request Embolt cannot answer
-// from a span (several ranges, a conditional request) goes to upstream as is.
+// opening one when no span can serve it. A player resuming a read sends
+// If-Range: a span answers it when it holds the version the header names.
+// A request Embolt cannot answer from a span (several ranges, another
+// conditional request, an If-Range for another version) goes to upstream as
+// is.
 func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request, target *url.URL) {
 	key, mbps := s.catalog.session(r)
 	req := s.outbound(r, target)
@@ -548,6 +551,10 @@ func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request, target *url
 	if !ok || conditional(r.Header) {
 		s.passThrough(w, req, key, mbps)
 		return
+	}
+	ifRange := ""
+	if r.Header.Get("Range") != "" { // without a Range, If-Range is ignored
+		ifRange = r.Header.Get("If-Range")
 	}
 	fk := fileKey(key, target, r)
 	for range 2 { // a span that fails to open sends the requests that joined it to open their own
@@ -580,16 +587,29 @@ func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request, target *url
 		} else {
 			ra.mu.Unlock()
 		}
-		if s.read(w, r, sp, rd, last) {
+		switch s.read(w, r, sp, rd, last, ifRange) {
+		case served:
+			return
+		case stale:
+			s.passThrough(w, req, key, mbps) // upstream answers with the whole file
 			return
 		}
 	}
 	http.Error(w, "embolt: no node could open the stream", http.StatusBadGateway)
 }
 
-// read waits for sp to open and answers rd's request from it. It reports
-// false, having written nothing, if sp failed to open.
-func (s *Server) read(w http.ResponseWriter, r *http.Request, sp *span, rd *reader, last int64) bool {
+// answer says how read answered a request.
+type answer int
+
+const (
+	served   answer = iota // it wrote a response, or the player left
+	unopened               // sp failed to open; nothing was written
+	stale                  // sp holds another version than the request's If-Range names; nothing was written
+)
+
+// read waits for sp to open and answers rd's request from it, if sp holds
+// the version ifRange names ("" for any).
+func (s *Server) read(w http.ResponseWriter, r *http.Request, sp *span, rd *reader, last int64, ifRange string) answer {
 	ra, ctx := s.ra, r.Context()
 	ra.mu.Lock()
 	defer func() {
@@ -598,17 +618,20 @@ func (s *Server) read(w http.ResponseWriter, r *http.Request, sp *span, rd *read
 	}()
 	for !sp.ready && !sp.dead {
 		if !sp.wait(ctx) {
-			return true
+			return served
 		}
 	}
 	if !sp.ready {
-		return false
+		return unopened
+	}
+	if ifRange != "" && !sp.holds(ifRange) {
+		return stale
 	}
 	if rd.pos >= sp.total {
 		ra.mu.Unlock()
 		unsatisfiable(w, sp.total)
 		ra.mu.Lock()
-		return true
+		return served
 	}
 	if last < 0 || last >= sp.total {
 		last = sp.total - 1
@@ -635,11 +658,11 @@ func (s *Server) read(w http.ResponseWriter, r *http.Request, sp *span, rd *read
 			ok := sp.wait(ctx)
 			underrun.Add(time.Since(t0).Seconds())
 			if !ok {
-				return true
+				return served
 			}
 		}
 		if rd.pos >= sp.to {
-			return true // the feed ended early: the player re-requests
+			return served // the feed ended early: the player re-requests
 		}
 		b := sp.at(rd.pos, last)
 		ra.mu.Unlock()
@@ -647,10 +670,17 @@ func (s *Server) read(w http.ResponseWriter, r *http.Request, sp *span, rd *read
 		ra.mu.Lock()
 		sp.advance(rd, int64(n))
 		if err != nil {
-			return true // the player closed: a seek or a stop
+			return served // the player closed: a seek or a stop
 		}
 	}
-	return true
+	return served
+}
+
+// holds reports whether sp holds the version of the file an If-Range names:
+// its strong ETag, or its Last-Modified date. Requires ra.mu.
+func (sp *span) holds(ifRange string) bool {
+	etag := sp.header.Get("ETag")
+	return ifRange == etag && !strings.HasPrefix(etag, "W/") || ifRange == sp.header.Get("Last-Modified")
 }
 
 // woke says why a wait on a span returned.
@@ -745,8 +775,10 @@ func parseRange(v string) (first, last int64, ok bool) {
 	return first, last, err == nil && last >= first
 }
 
+// conditional reports whether a request carries a precondition other than
+// If-Range, which a span checks itself.
 func conditional(h http.Header) bool {
-	for _, k := range []string{"If-Range", "If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since"} {
+	for _, k := range []string{"If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since"} {
 		if h.Get(k) != "" {
 			return true
 		}
