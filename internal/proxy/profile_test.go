@@ -51,6 +51,8 @@ func (f *fakeEmby) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ids := strings.Split(query(r.URL, "Ids"), ",")
 		eps = slices.DeleteFunc(eps, func(ep map[string]any) bool { return !slices.Contains(ids, ep["Id"].(string)) })
 		json.NewEncoder(w).Encode(map[string]any{"Items": eps, "TotalRecordCount": len(eps)})
+	case "/emby/Shows/s2/Episodes":
+		json.NewEncoder(w).Encode(map[string]any{"Items": []any{}, "TotalRecordCount": 0})
 	case "/emby/Shows/s1/Episodes":
 		json.NewEncoder(w).Encode(map[string]any{"Items": eps, "TotalRecordCount": len(eps)})
 	case "/emby/Sessions/Playing/Stopped":
@@ -139,13 +141,46 @@ func TestLocalProfile(t *testing.T) {
 	}
 
 	call("POST", "/emby/Users/u1/PlayedItems/7", "")
-	next := call("GET", "/emby/Shows/NextUp?UserId=u1&Limit=1", "")
+	next := call("GET", "/emby/Shows/NextUp?UserId=u1&LegacyNextUp=true&Limit=1", "")
 	if got := ids(next); !slices.Equal(got, []string{"8"}) {
 		t.Errorf("next up %v, want [8]", got)
 	}
-	if got := ids(call("GET", "/emby/Users/u1/Items/Resume", "")); got != nil {
+	if got := ids(call("GET", "/emby/Users/u1/Items/Resume?MediaTypes=Video&IncludeNextUp=false", "")); got != nil {
 		t.Errorf("a played item stays in resume: %v", got)
 	}
+}
+
+func TestLocalProfileNextUpEmptyArray(t *testing.T) {
+	upstream := httptest.NewServer(&fakeEmby{})
+	defer upstream.Close()
+	s, _ := newTestServer(t, upstream.URL, "profile: local")
+	px := httptest.NewServer(s)
+	defer px.Close()
+
+	check := func(t *testing.T, query string) {
+		t.Helper()
+		resp, err := http.Get(px.URL + "/emby/Shows/NextUp?UserId=u1" + query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusOK || string(raw) != `{"Items":[],"TotalRecordCount":0}` {
+			t.Errorf("empty NextUp %s: status=%d body=%s, want an empty Items array", query, resp.StatusCode, raw)
+		}
+	}
+
+	t.Run("new profile", func(t *testing.T) { check(t, "") })
+	for _, id := range []string{"7", "8", "9"} {
+		s.profile.Learn(id, profile.Meta{Type: "Episode", Series: "s1"})
+		s.profile.MarkPlayed(id, time.Now())
+	}
+	t.Run("unwatched series", func(t *testing.T) { check(t, "&SeriesId=s2") })
+	t.Run("completed series", func(t *testing.T) { check(t, "&SeriesId=s1") })
+	t.Run("empty page", func(t *testing.T) { check(t, "&StartIndex=10&Limit=1") })
 }
 
 func TestWSFilterRewritesOnlyUserData(t *testing.T) {
@@ -243,47 +278,5 @@ func TestWebsocketPushThroughProxy(t *testing.T) {
 	}
 	if extensions != "" {
 		t.Errorf("the server was offered %q", extensions)
-	}
-}
-
-func TestNextUpFollowsTheLastPlayedAndAiredOrder(t *testing.T) {
-	p, _ := profile.Open("")
-	s := &Server{profile: p}
-	ep := func(id string, season, n int, extra ...any) map[string]any {
-		m := map[string]any{"Id": id, "ParentIndexNumber": json.Number(fmt.Sprint(season)), "IndexNumber": json.Number(fmt.Sprint(n))}
-		for i := 0; i < len(extra); i += 2 {
-			m[extra[i].(string)] = json.Number(fmt.Sprint(extra[i+1]))
-		}
-		return m
-	}
-	eps := []map[string]any{
-		ep("sp1", 0, 1, "AirsBeforeSeasonNumber", 2),
-		ep("sp2", 0, 2), // no placement: never next up
-		ep("e1", 1, 1), ep("e2", 1, 2), ep("e3", 1, 3),
-		ep("f1", 2, 1),
-	}
-	next := func(resumable bool, cutoff time.Time) string {
-		if got := s.nextEpisode(eps, resumable, cutoff); got != nil {
-			return got["Id"].(string)
-		}
-		return ""
-	}
-
-	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	p.MarkPlayed("e3", t0)
-	p.MarkPlayed("e1", t0.Add(time.Hour)) // went back to the start
-	if got := next(true, time.Time{}); got != "e2" {
-		t.Errorf("after e3 then e1: next up %q, want e2, after the one played last", got)
-	}
-	p.MarkPlayed("e2", t0.Add(2*time.Hour))
-	if got := next(true, time.Time{}); got != "sp1" {
-		t.Errorf("after season 1: next up %q, want the special that aired before season 2", got)
-	}
-	p.Progress("sp1", 1, t0)
-	if got := next(false, time.Time{}); got != "" {
-		t.Errorf("with the next episode in progress and EnableResumable=false: next up %q, want none", got)
-	}
-	if got := next(true, t0.Add(3*time.Hour)); got != "" {
-		t.Errorf("last played before the cutoff: next up %q, want none", got)
 	}
 }

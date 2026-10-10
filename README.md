@@ -41,6 +41,23 @@ change anything, edit the config, which reloads by itself.
 | `:8096` (`:8920` with TLS) | Emby-compatible ingress |
 | `:9090` | pane, `/api/v1/*`, `/metrics`, `/healthz` |
 
+## Local viewing profile
+
+Set `profile: local` to keep progress, watched marks and preferences in
+`data_dir/profile.json`. Continue Watching uses Emby's `Items/Resume`
+semantics: `IncludeNextUp` defaults to true, while false returns only resume
+points. `Shows/NextUp?LegacyNextUp=true` supplies the traditional home row;
+with `SeriesId`, it supplies the playback queue, including already-watched
+episodes after the selected starting point. The series' normal episode list
+stays complete and carries the local watched marks and progress.
+
+The list behavior is tested against recorded responses from Emby Server
+4.9.5.0, the compatibility target for these endpoints. The
+[reference cases](internal/proxy/testdata/emby-4.9.5-nextup.json) cover resume,
+completion, rewatching, specials, multiple series, filters, paging and empty
+results. `go test ./internal/proxy -run TestProfileListsMatchEmby495` checks
+those responses against the proxy with conflicting upstream user data.
+
 ## How it decides
 
 Every node keeps a moving average of its rate, from 2 s samples of real

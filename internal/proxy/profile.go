@@ -7,14 +7,12 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"math"
 	"net/http"
 	"net/url"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/zhousiru/embolt/internal/profile"
@@ -31,7 +29,6 @@ const (
 	maxOverlay = 64 << 20 // a larger JSON body passes through as it is
 	maxBody    = 1 << 20  // most a player's write may carry
 	maxIDs     = 500      // most item IDs one rewritten query names
-	nextUpScan = 50       // most series Next Up looks into
 	nextUpPar  = 6        // series Next Up fetches at once
 
 	embyTime = "2006-01-02T15:04:05.0000000Z07:00"
@@ -278,14 +275,6 @@ func setIf[T any](dst *T, v *T) {
 	}
 }
 
-// resume answers /Users/{u}/Items/Resume from the local resume points.
-func (s *Server) resume(w http.ResponseWriter, r *http.Request, itemsPath string) {
-	q := r.URL.Query()
-	start, limit := page(q)
-	q.Set("Recursive", "true")
-	s.listIDs(w, r, itemsPath, q, s.profile.IDs(profile.Resumable, maxIDs), true, start, limit)
-}
-
 // filtered answers an item query that filters on user data from the local
 // profile: the filters become Ids and ExcludeItemIds. It reports whether
 // the query had such a filter.
@@ -420,131 +409,6 @@ func (s *Server) listIDs(w http.ResponseWriter, r *http.Request, path string, q 
 		list = list[:min(limit, len(list))]
 	}
 	writeJSON(w, map[string]any{"Items": list, "TotalRecordCount": total})
-}
-
-// nextUp answers /Shows/NextUp from the local played marks, for each series
-// watched here, most recent first.
-func (s *Server) nextUp(w http.ResponseWriter, r *http.Request, prefix string) {
-	q := r.URL.Query()
-	start, limit := page(q)
-	series := s.profile.Series()
-	if id := itemID(qget(q, "SeriesId")); id != "" {
-		series = slices.DeleteFunc(series, func(s string) bool { return s != id })
-	}
-	series = series[:min(len(series), nextUpScan)]
-	resumable := !strings.EqualFold(qget(q, "EnableResumable"), "false")
-	cutoff := datePlayed(qget(q, "NextUpDateCutoff"))
-	fields := strings.Trim(qget(q, "Fields")+",SpecialEpisodeNumbers", ",") // where specials aired
-	qdel(q, "SeriesId", "ParentId", "NextUpDateCutoff", "EnableResumable", "EnableRewatching", "DisableFirstEpisode", "Legacy", "Fields")
-	q.Set("Fields", fields)
-
-	var found []map[string]any
-	var firstErr error
-	for i := 0; i < len(series) && (limit == 0 || len(found) < start+limit); i += nextUpPar {
-		batch := series[i:min(i+nextUpPar, len(series))]
-		next := make([]map[string]any, len(batch))
-		errs := make([]error, len(batch))
-		var wg sync.WaitGroup
-		for j, id := range batch {
-			wg.Go(func() {
-				v, err := s.get(r, prefix+"/Shows/"+url.PathEscape(id)+"/Episodes", q)
-				if err != nil {
-					errs[j] = err
-					return
-				}
-				next[j] = s.nextEpisode(items(v), resumable, cutoff)
-			})
-		}
-		wg.Wait()
-		for j := range batch {
-			firstErr = cmp.Or(firstErr, errs[j])
-			if next[j] != nil {
-				found = append(found, next[j])
-			}
-		}
-	}
-	if len(found) == 0 && firstErr != nil {
-		replyError(w, firstErr)
-		return
-	}
-	total := len(found)
-	found = found[min(start, total):]
-	if limit > 0 {
-		found = found[:min(limit, len(found))]
-	}
-	writeJSON(w, map[string]any{"Items": found, "TotalRecordCount": total})
-}
-
-// nextEpisode picks Next Up from a series' episodes, as Emby does: the
-// first unplayed episode, in the order they aired, after the most recently
-// played one. Of episodes played at once, as when a season is marked, the
-// last in order counts. A series last played before cutoff has none, and
-// so does one whose next episode is in progress, unless resumable.
-func (s *Server) nextEpisode(eps []map[string]any, resumable bool, cutoff time.Time) map[string]any {
-	eps = airedOrder(eps)
-	last, lastAt := -1, time.Time{}
-	for i, ep := range eps {
-		if e := s.profile.Get(itemID(str(ep["Id"]))); e.Played && !e.LastPlayed.Before(lastAt) {
-			last, lastAt = i, e.LastPlayed
-		}
-	}
-	if last < 0 || lastAt.Before(cutoff) {
-		return nil
-	}
-	for _, ep := range eps[last+1:] {
-		switch e := s.profile.Get(itemID(str(ep["Id"]))); {
-		case e.Played:
-		case e.Position > 0 && !resumable:
-			return nil
-		default:
-			return ep
-		}
-	}
-	return nil
-}
-
-// airedOrder sorts episodes as they aired. A special goes where its
-// AirsBefore or AirsAfter numbers place it; one without them is left out.
-func airedOrder(eps []map[string]any) []map[string]any {
-	type placed struct {
-		ep                   map[string]any
-		season, episode, tie int
-	}
-	var out []placed
-	for _, ep := range eps {
-		season, okS := num(ep["ParentIndexNumber"])
-		episode, okE := num(ep["IndexNumber"])
-		switch {
-		case !okS || season != 0:
-			if !okS || !okE { // unnumbered: keep the server's order, without specials
-				return slices.DeleteFunc(slices.Clone(eps), func(ep map[string]any) bool { return str(ep["ParentIndexNumber"]) == "0" })
-			}
-			out = append(out, placed{ep, season, episode, 0})
-		default:
-			if before, ok := num(ep["AirsBeforeSeasonNumber"]); ok {
-				at, ok := num(ep["AirsBeforeEpisodeNumber"])
-				if !ok {
-					at = math.MinInt
-				}
-				out = append(out, placed{ep, before, at, -1})
-			} else if after, ok := num(ep["AirsAfterSeasonNumber"]); ok {
-				out = append(out, placed{ep, after, math.MaxInt, 0})
-			}
-		}
-	}
-	slices.SortStableFunc(out, func(a, b placed) int {
-		return cmp.Or(cmp.Compare(a.season, b.season), cmp.Compare(a.episode, b.episode), cmp.Compare(a.tie, b.tie))
-	})
-	sorted := make([]map[string]any, len(out))
-	for i, p := range out {
-		sorted[i] = p.ep
-	}
-	return sorted
-}
-
-func num(v any) (int, bool) {
-	n, err := strconv.Atoi(str(v))
-	return n, err == nil
 }
 
 // overlayResponse puts the local profile into a JSON answer from the server.
