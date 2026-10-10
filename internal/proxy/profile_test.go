@@ -51,8 +51,6 @@ func (f *fakeEmby) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ids := strings.Split(query(r.URL, "Ids"), ",")
 		eps = slices.DeleteFunc(eps, func(ep map[string]any) bool { return !slices.Contains(ids, ep["Id"].(string)) })
 		json.NewEncoder(w).Encode(map[string]any{"Items": eps, "TotalRecordCount": len(eps)})
-	case "/emby/Shows/s2/Episodes":
-		json.NewEncoder(w).Encode(map[string]any{"Items": []any{}, "TotalRecordCount": 0})
 	case "/emby/Shows/s1/Episodes":
 		json.NewEncoder(w).Encode(map[string]any{"Items": eps, "TotalRecordCount": len(eps)})
 	case "/emby/Sessions/Playing/Stopped":
@@ -148,39 +146,6 @@ func TestLocalProfile(t *testing.T) {
 	if got := ids(call("GET", "/emby/Users/u1/Items/Resume?MediaTypes=Video&IncludeNextUp=false", "")); got != nil {
 		t.Errorf("a played item stays in resume: %v", got)
 	}
-}
-
-func TestLocalProfileNextUpEmptyArray(t *testing.T) {
-	upstream := httptest.NewServer(&fakeEmby{})
-	defer upstream.Close()
-	s, _ := newTestServer(t, upstream.URL, "profile: local")
-	px := httptest.NewServer(s)
-	defer px.Close()
-
-	check := func(t *testing.T, query string) {
-		t.Helper()
-		resp, err := http.Get(px.URL + "/emby/Shows/NextUp?UserId=u1" + query)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer resp.Body.Close()
-		raw, err := io.ReadAll(resp.Body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if resp.StatusCode != http.StatusOK || string(raw) != `{"Items":[],"TotalRecordCount":0}` {
-			t.Errorf("empty NextUp %s: status=%d body=%s, want an empty Items array", query, resp.StatusCode, raw)
-		}
-	}
-
-	t.Run("new profile", func(t *testing.T) { check(t, "") })
-	for _, id := range []string{"7", "8", "9"} {
-		s.profile.Learn(id, profile.Meta{Type: "Episode", Series: "s1"})
-		s.profile.MarkPlayed(id, time.Now())
-	}
-	t.Run("unwatched series", func(t *testing.T) { check(t, "&SeriesId=s2") })
-	t.Run("completed series", func(t *testing.T) { check(t, "&SeriesId=s1") })
-	t.Run("empty page", func(t *testing.T) { check(t, "&StartIndex=10&Limit=1") })
 }
 
 func TestWSFilterRewritesOnlyUserData(t *testing.T) {

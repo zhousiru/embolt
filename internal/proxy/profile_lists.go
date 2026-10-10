@@ -16,7 +16,7 @@ import (
 
 // Emby 4.9.5 uses Resume for Continue Watching (IncludeNextUp defaults to
 // true), NextUp with LegacyNextUp for the old home row, and NextUp with a
-// SeriesId for a playback queue. See testdata/emby-4.9.5-nextup.json.
+// SeriesId for a playback queue.
 func (s *Server) resume(w http.ResponseWriter, r *http.Request, path string) {
 	q := r.URL.Query()
 	video := containsValue(qget(q, "MediaTypes"), "Video") || containsValue(qget(q, "IncludeItemTypes"), "Episode")
