@@ -1,6 +1,7 @@
 package profile
 
 import (
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -116,3 +117,46 @@ func TestOrderAndPersistence(t *testing.T) {
 }
 
 func ptr(n int64) *int64 { return &n }
+
+func TestHiddenPersistenceAndMetadataAfterUnplay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "profile.json")
+	s, _ := Open(path)
+	s.Learn("ep", Meta{Type: "Episode", Series: "series", Runtime: hour})
+	s.Progress("ep", hour/2, time.Now())
+	s.SetHidden("ep", true)
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	s, _ = Open(path)
+	if !s.Hidden("ep") || s.Get("ep").Position != hour/2 {
+		t.Fatal("hidden progress did not survive restart")
+	}
+	s.MarkUnplayed("ep")
+	if s.Get("ep").Runtime != hour || s.Get("ep").Series != "series" {
+		t.Fatal("clearing history lost metadata")
+	}
+	s.Started("ep", time.Now())
+	if s.Hidden("series") {
+		t.Fatal("starting playback did not unhide series")
+	}
+}
+
+func TestSaveRetriesAfterFailure(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "missing")
+	path := filepath.Join(dir, "profile.json")
+	s, _ := Open(path)
+	s.MarkPlayed("ep", time.Now())
+	if err := s.Save(); err == nil {
+		t.Fatal("expected missing directory error")
+	}
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Open(path)
+	if err != nil || !loaded.Get("ep").Played {
+		t.Fatalf("failed write was not retried: %v", err)
+	}
+}

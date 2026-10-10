@@ -162,6 +162,10 @@ func (s *Server) fixHeaders(h http.Header, target *url.URL) {
 }
 
 func (s *Server) modifyResponse(resp *http.Response) error {
+	if apply, ok := resp.Request.Context().Value(pendingProfileReport{}).(func()); ok && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		apply()
+	}
+
 	rt := routeOf(resp.Request)
 	if loc := resp.Header.Get("Location"); loc != "" {
 		if rel, ok := s.stripOrigin(loc); ok {

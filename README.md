@@ -58,6 +58,10 @@ completion, rewatching, specials, multiple series, filters, paging and empty
 results. `go test ./internal/proxy -run TestProfileListsMatchEmby495` checks
 those responses against the proxy with conflicting upstream user data.
 
+The [compatibility audit](docs/local-profile-compatibility.md) tracks verified
+write contracts and remaining differences from Emby 4.9.5, including folder
+counts, Latest selection and multi-client notifications.
+
 ## How it decides
 
 Every node keeps a moving average of its rate, from 2 s samples of real

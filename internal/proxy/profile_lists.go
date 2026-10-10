@@ -23,24 +23,26 @@ func (s *Server) resume(w http.ResponseWriter, r *http.Request, path string) {
 	includeNext := video && !strings.EqualFold(qget(q, "IncludeNextUp"), "false")
 	var candidates []profileCandidate
 	queue := false
-	if includeNext {
-		if parent := itemID(qget(q, "ParentId")); parent != "" {
-			typ := s.profile.Get(parent).Type
-			if typ == "" {
-				v, err := s.get(r, path+"/"+url.PathEscape(parent), authQuery(r))
-				if err != nil {
-					replyError(w, err)
-					return
-				}
-				if m, ok := v.(map[string]any); ok {
-					typ = str(m["Type"])
-				}
+	scopedSeries := false
+	if parent := itemID(qget(q, "ParentId")); parent != "" {
+		typ := s.profile.Get(parent).Type
+		if typ == "" {
+			v, err := s.get(r, path+"/"+url.PathEscape(parent), authQuery(r))
+			if err != nil {
+				replyError(w, err)
+				return
 			}
-			if typ == "Series" {
-				q.Set("SeriesId", parent)
-				queue = true
+			if m, ok := v.(map[string]any); ok {
+				typ = str(m["Type"])
 			}
 		}
+		if typ == "Series" {
+			q.Set("SeriesId", parent)
+			scopedSeries = true
+			queue = includeNext
+		}
+	}
+	if includeNext {
 		var err error
 		candidates, err = s.continuations(r, q, continuationMode{queue: queue, resumeOnly: containsValue(qget(q, "ExcludeItemTypes"), "Episode")})
 		if err != nil {
@@ -51,7 +53,7 @@ func (s *Server) resume(w http.ResponseWriter, r *http.Request, path string) {
 	if !queue {
 		for _, id := range s.profile.IDs(profile.Resumable, math.MaxInt) {
 			e := s.profile.Get(id)
-			if includeNext && e.Series != "" {
+			if !scopedSeries && s.profile.Hidden(id) || includeNext && e.Series != "" {
 				continue
 			}
 			candidates = append(candidates, profileCandidate{id, e.LastPlayed})
@@ -92,6 +94,9 @@ type profileCandidate struct {
 // the start entirely from local user data. It never calls upstream NextUp.
 func (s *Server) continuations(r *http.Request, q url.Values, mode continuationMode) ([]profileCandidate, error) {
 	series := s.profile.Series()
+	if !mode.queue {
+		series = slices.DeleteFunc(series, s.profile.Hidden)
+	}
 	if id := itemID(qget(q, "SeriesId")); mode.queue {
 		series = []string{id}
 	}

@@ -36,6 +36,7 @@ const (
 
 // Entry is one item's user data, plus what is known about the item.
 type Entry struct {
+	Hidden     bool      `json:"hidden,omitempty"`
 	Position   int64     `json:"pos,omitempty"` // ticks
 	Played     bool      `json:"played,omitempty"`
 	PlayCount  int       `json:"plays,omitempty"`
@@ -58,7 +59,7 @@ type Meta struct {
 func (m Meta) resumable() bool { return m.Type != "Audio" }
 
 func (e *Entry) empty() bool {
-	return e.Position == 0 && !e.Played && e.PlayCount == 0 && !e.Favorite && e.Likes == nil
+	return e.LastPlayed.IsZero() && !e.Hidden && e.Position == 0 && !e.Played && e.PlayCount == 0 && !e.Favorite && e.Likes == nil
 }
 
 // merge fills m's unknown fields from o.
@@ -148,14 +149,22 @@ func (s *Store) Save() error {
 	raw, err := json.Marshal(file{Items: s.items, Prefs: s.prefs, Configs: s.configs})
 	s.dirty = false
 	s.mu.Unlock()
+	defer func() {
+		if err != nil {
+			s.mu.Lock()
+			s.dirty = true
+			s.mu.Unlock()
+		}
+	}()
 	if err != nil {
 		return err
 	}
 	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	if err = os.WriteFile(tmp, raw, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	err = os.Rename(tmp, s.path)
+	return err
 }
 
 // Learn records what an item is, from a DTO the server sent.
@@ -201,6 +210,7 @@ func (s *Store) update(id string, f func(*Entry)) Entry {
 	e := s.get(id)
 	f(&e)
 	if e.empty() {
+		s.meta[id] = e.Meta
 		delete(s.items, id)
 	} else {
 		s.items[id] = &e
@@ -211,7 +221,10 @@ func (s *Store) update(id string, f func(*Entry)) Entry {
 
 // Started records that playback began: every start counts as a play.
 func (s *Store) Started(id string, now time.Time) Entry {
-	return s.Update(id, func(e *Entry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.update(cmp.Or(s.get(id).Series, id), func(e *Entry) { e.Hidden = false })
+	return s.update(id, func(e *Entry) {
 		e.PlayCount++
 		e.LastPlayed = now
 		if !e.resumable() {
@@ -367,4 +380,17 @@ func (s *Store) SetConfig(user string, raw json.RawMessage) {
 	defer s.mu.Unlock()
 	s.configs[user] = raw
 	s.dirty = true
+}
+
+// SetHidden hides a series (or a standalone item) without deleting progress.
+func (s *Store) SetHidden(id string, hidden bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.update(cmp.Or(s.get(id).Series, id), func(e *Entry) { e.Hidden = hidden })
+}
+
+func (s *Store) Hidden(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.get(cmp.Or(s.get(id).Series, id)).Hidden
 }

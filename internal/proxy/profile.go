@@ -3,10 +3,10 @@ package proxy
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -42,7 +42,7 @@ var (
 	reNextUp  = regexp.MustCompile(`(?i)^((?:/emby)?)/shows/nextup$`)
 	reQuery   = regexp.MustCompile(`(?i)^(?:/emby)?(?:/users/[^/]+)?/items$`)
 	rePrefs   = regexp.MustCompile(`(?i)^(?:/emby)?/displaypreferences/([^/]+)$`)
-	reUserCfg = regexp.MustCompile(`(?i)^(?:/emby)?/users/([^/]+)/configuration$`)
+	reUserCfg = regexp.MustCompile(`(?i)^(?:/emby)?/users/([^/]+)/configuration(/partial)?$`)
 	reLatest  = regexp.MustCompile(`(?i)^(?:/emby)?/users/([^/]+)/items/latest$`)
 )
 
@@ -100,24 +100,30 @@ func (s *Server) serveProfile(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	case get && reQuery.MatchString(p):
 		return s.filtered(w, r)
-	case rePrefs.MatchString(p):
-		key := strings.ToLower(rePrefs.FindStringSubmatch(p)[1] + "/" + query(r.URL, "Client"))
-		switch {
-		case get:
-			if raw, ok := s.profile.Pref(key); ok {
-				writeJSON(w, raw)
-				return true
-			}
-		case post:
-			if raw, ok := readJSON(w, r); ok {
-				s.profile.SetPref(key, raw)
-				w.WriteHeader(http.StatusNoContent)
-			}
-			return true
-		}
+	case (get || post) && rePrefs.MatchString(p):
+		s.displayPreferences(w, r)
+		return true
+
 	case post && reUserCfg.MatchString(p):
 		if raw, ok := readJSON(w, r); ok {
-			s.profile.SetConfig(itemID(reUserCfg.FindStringSubmatch(p)[1]), raw)
+			m := reUserCfg.FindStringSubmatch(p)
+			id := itemID(m[1])
+			cfg := defaultUserConfiguration()
+			if m[2] != "" {
+				cfg = s.userConfiguration(id)
+			}
+			var update map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &update); err != nil || update == nil {
+				http.Error(w, "want a configuration object", http.StatusBadRequest)
+				return true
+			}
+			for k, v := range update {
+				if _, known := cfg[k]; known || k == "AudioLanguagePreference" || k == "SubtitleLanguagePreference" || k == "ProfilePin" {
+					cfg[k] = v
+				}
+			}
+			encoded, _ := json.Marshal(cfg)
+			s.profile.SetConfig(id, encoded)
 			w.WriteHeader(http.StatusNoContent)
 		}
 		return true
@@ -147,7 +153,7 @@ func (s *Server) report(r *http.Request, kind string) {
 	if id == "" || kind == "/stopped" && rep["Failed"] == true { // the server keeps no state for a failed play
 		return
 	}
-	s.playState(id, kind, ticks(field("PositionTicks")))
+	s.deferPlayState(r, id, kind, ticks(field("PositionTicks")))
 }
 
 // playState records a start ("" kind), "/progress" or "/stopped" report.
@@ -171,14 +177,19 @@ func (s *Server) mark(w http.ResponseWriter, r *http.Request, m []string) bool {
 		if del {
 			suffix = "/stopped"
 		}
-		s.playState(id, suffix, ticks(query(r.URL, "PositionTicks")))
+		s.deferPlayState(r, id, suffix, ticks(query(r.URL, "PositionTicks")))
 		return false
 	case suffix == "/progress":
 		return false
 	case kind == "favoriteitems":
 		replyUserData(w, id, s.profile.Update(id, func(e *profile.Entry) { e.Favorite = !del }))
 	default:
-		replyUserData(w, id, s.markTree(r, user, id, !del, datePlayed(query(r.URL, "DatePlayed"))))
+		entry, err := s.markTree(r, user, id, !del, datePlayed(query(r.URL, "DatePlayed")))
+		if err != nil {
+			replyError(w, err)
+		} else {
+			replyUserData(w, id, entry)
+		}
 	}
 	return true
 }
@@ -195,7 +206,7 @@ func datePlayed(v string) time.Time {
 
 // markTree marks an item played or unplayed, and every item under it, as
 // the server does for a series or season. user is the /Users/{u} prefix.
-func (s *Server) markTree(r *http.Request, user, id string, played bool, at time.Time) profile.Entry {
+func (s *Server) markTree(r *http.Request, user, id string, played bool, at time.Time) (profile.Entry, error) {
 	ids := []string{id}
 	if e := s.profile.Get(id); e.Type == "" || e.Folder {
 		q := authQuery(r)
@@ -211,7 +222,7 @@ func (s *Server) markTree(r *http.Request, user, id string, played bool, at time
 				}
 			}
 		} else {
-			slog.Debug("could not list an item's children", "item", id, "err", err)
+			return profile.Entry{}, err
 		}
 	}
 	for _, c := range slices.Backward(ids) { // children first, so a folder's own mark is last
@@ -221,35 +232,36 @@ func (s *Server) markTree(r *http.Request, user, id string, played bool, at time
 			s.profile.MarkUnplayed(c)
 		}
 	}
-	return s.profile.Get(id)
+	return s.profile.Get(id), nil
 }
 
 // itemOp handles /Users/{u}/Items/{id}/{Rating,UserData,HideFromResume}.
 func (s *Server) itemOp(w http.ResponseWriter, r *http.Request, id, op string) bool {
 	var f func(*profile.Entry)
 	switch {
-	case op == "rating" && r.Method == http.MethodPost:
-		likes := strings.EqualFold(query(r.URL, "Likes"), "true")
-		f = func(e *profile.Entry) { e.Likes = &likes }
 	case op == "rating", op == "rating/delete":
 		f = func(e *profile.Entry) { e.Likes = nil }
 	case op == "hidefromresume":
-		hide := !strings.EqualFold(query(r.URL, "Hide"), "false")
-		f = func(e *profile.Entry) {
-			if hide {
-				e.Position = 0
+		if s.profile.Get(id).Type == "" {
+			path := r.URL.Path[:strings.LastIndex(r.URL.Path, "/")]
+			if _, err := s.get(r, path, authQuery(r)); err != nil {
+				replyError(w, err)
+				return true
 			}
 		}
-	default: // userdata: a partial UserItemDataDto
+		hide := !strings.EqualFold(query(r.URL, "Hide"), "false")
+		s.profile.SetHidden(id, hide)
+		replyUserData(w, id, s.profile.Get(id))
+		return true
+	default: // Emby replaces position/played, but patches count/date.
 		raw, ok := readJSON(w, r)
 		if !ok {
 			return true
 		}
 		var d struct {
-			PlaybackPositionTicks *int64
+			PlaybackPositionTicks int64
 			PlayCount             *int
-			IsFavorite, Played    *bool
-			Likes                 *bool
+			Played                bool
 			LastPlayedDate        *time.Time
 		}
 		if err := json.Unmarshal(raw, &d); err != nil {
@@ -257,13 +269,14 @@ func (s *Server) itemOp(w http.ResponseWriter, r *http.Request, id, op string) b
 			return true
 		}
 		f = func(e *profile.Entry) {
-			setIf(&e.Position, d.PlaybackPositionTicks)
+			e.Position = d.PlaybackPositionTicks
 			setIf(&e.PlayCount, d.PlayCount)
-			setIf(&e.Favorite, d.IsFavorite)
-			setIf(&e.Played, d.Played)
+			e.Played = d.Played
 			setIf(&e.LastPlayed, d.LastPlayedDate)
-			e.Likes = d.Likes
 		}
+		s.profile.Update(id, f)
+		w.WriteHeader(http.StatusNoContent)
+		return true
 	}
 	replyUserData(w, id, s.profile.Update(id, f))
 	return true
@@ -483,8 +496,8 @@ func (s *Server) overlay(v any) bool {
 			v["UserData"] = userData(id, s.profile.Get(id), old)
 			changed = true
 		}
-		if cfg := s.profile.Config(id); cfg != nil && v["Policy"] != nil && v["Configuration"] != nil {
-			v["Configuration"] = cfg
+		if v["Policy"] != nil && v["Configuration"] != nil {
+			v["Configuration"] = s.userConfiguration(id)
 			changed = true
 		}
 	}
@@ -711,4 +724,85 @@ func peek(resp *http.Response, limit int64) (raw []byte, ok bool, err error) {
 	resp.Body.Close()
 	resp.Body = io.NopCloser(bytes.NewReader(raw))
 	return raw, true, nil
+}
+
+type pendingProfileReport struct{}
+
+// Apply reports only after the playback server accepts them.
+func (s *Server) deferPlayState(r *http.Request, id, kind string, pos *int64) {
+	apply := func() { s.playState(id, kind, pos) }
+	*r = *r.WithContext(context.WithValue(r.Context(), pendingProfileReport{}, apply))
+}
+
+func defaultUserConfiguration() map[string]json.RawMessage {
+	var cfg map[string]json.RawMessage
+	_ = json.Unmarshal([]byte(`{"PlayDefaultAudioTrack":true,"DisplayMissingEpisodes":false,"SubtitleMode":"Smart","OrderedViews":[],"LatestItemsExcludes":[],"MyMediaExcludes":[],"HidePlayedInLatest":true,"HidePlayedInMoreLikeThis":false,"HidePlayedInSuggestions":false,"RememberAudioSelections":true,"RememberSubtitleSelections":true,"EnableNextEpisodeAutoPlay":true,"ResumeRewindSeconds":0,"IntroSkipMode":"ShowButton","EnableLocalPassword":false}`), &cfg)
+	return cfg
+}
+
+func (s *Server) userConfiguration(id string) map[string]json.RawMessage {
+	cfg := defaultUserConfiguration()
+	var saved map[string]json.RawMessage
+	_ = json.Unmarshal(s.profile.Config(id), &saved)
+	for k, v := range saved {
+		cfg[k] = v
+	}
+	return cfg
+}
+
+// Emby stores CustomPrefs as a replacement map. DTO identity comes from
+// the server, but a fresh local profile never inherits its preferences.
+func (s *Server) displayPreferences(w http.ResponseWriter, r *http.Request) {
+	key := strings.ToLower(rePrefs.FindStringSubmatch(r.URL.Path)[1] + "/" + query(r.URL, "Client"))
+	prefs := map[string]any{}
+	if raw, ok := s.profile.Pref(key); ok {
+		_ = decodeJSON(raw, &prefs)
+	} else {
+		v, err := s.get(r, r.URL.Path, r.URL.Query())
+		if err != nil {
+			replyError(w, err)
+			return
+		}
+		remote, ok := v.(map[string]any)
+		if !ok {
+			http.Error(w, "invalid display preferences", http.StatusBadGateway)
+			return
+		}
+		for _, k := range []string{"Id", "Client"} {
+			if v, ok := remote[k]; ok {
+				prefs[k] = v
+			}
+		}
+		prefs["CustomPrefs"] = map[string]any{}
+	}
+	if prefs == nil {
+		prefs = map[string]any{}
+	}
+	if prefs["CustomPrefs"] == nil {
+		prefs["CustomPrefs"] = map[string]any{}
+	}
+	prefs["SortOrder"] = "Ascending"
+	delete(prefs, "SortBy")
+	if r.Method == http.MethodPost {
+		raw, ok := readJSON(w, r)
+		if !ok {
+			return
+		}
+		var update struct{ CustomPrefs map[string]string }
+		if err := json.Unmarshal(raw, &update); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if update.CustomPrefs == nil {
+			update.CustomPrefs = map[string]string{}
+		}
+		prefs["CustomPrefs"] = update.CustomPrefs
+	}
+	raw, _ := json.Marshal(prefs)
+	s.profile.SetPref(key, raw)
+	if r.Method == http.MethodPost {
+		w.WriteHeader(http.StatusNoContent)
+	} else {
+		writeJSON(w, prefs)
+	}
 }
