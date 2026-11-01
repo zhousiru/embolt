@@ -17,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"github.com/zhousiru/embolt/internal/control"
+	"github.com/zhousiru/embolt/internal/nodes"
 )
 
 // The read-ahead is shared by a player's connections. A player may read a
@@ -740,7 +741,8 @@ func (s *Server) outbound(r *http.Request, target *url.URL) *http.Request {
 
 // passThrough sends a request Embolt cannot answer from a span to upstream
 // as it is, on the session's media node, and relays the answer. A node that
-// cannot connect is failed over, at most maxAttempts tries in all.
+// cannot connect or returns a final 403 is failed over, at most maxAttempts
+// tries on distinct nodes in all.
 func (s *Server) passThrough(w http.ResponseWriter, req *http.Request, key string, mbps float64) {
 	play, err := s.ctrl.Play(key, mbps)
 	if err != nil {
@@ -751,20 +753,30 @@ func (s *Server) passThrough(w http.ResponseWriter, req *http.Request, key strin
 	defer play.Watch()()
 	ctx := req.Context()
 	n := play.Node()
-	for range maxAttempts {
+	var tried []*nodes.Node
+	for attempt := range maxAttempts {
 		if n == nil {
 			break
 		}
+		tried = append(tried, n)
 		resp, err := s.fetch(n, req.Clone(ctx))
 		s.observe(ctx, n, err)
 		if err == nil {
+			if resp.StatusCode == http.StatusForbidden && ctx.Err() == nil {
+				s.forbidden(play.Key(), n, "passthrough")
+				if next := play.Failover(tried...); next != nil && attempt+1 < maxAttempts {
+					resp.Body.Close()
+					n = next
+					continue
+				}
+			}
 			relay(w, resp)
 			return
 		}
 		if ctx.Err() != nil {
 			return
 		}
-		n = play.Failover(n)
+		n = play.Failover(tried...)
 	}
 	http.Error(w, "embolt: no node could open the stream", http.StatusBadGateway)
 }

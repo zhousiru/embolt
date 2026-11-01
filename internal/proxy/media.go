@@ -160,13 +160,24 @@ func (fd *feed) run(resp *http.Response) {
 }
 
 // start opens the span's range on the session's media node, failing over if
-// the node cannot connect.
+// the node cannot connect or its exit is forbidden by the upstream.
 func (fd *feed) start(rng string) (*http.Response, error) {
 	n := fd.play.Node()
+	var tried []*nodes.Node
 	fd.meter.begin()
-	for range maxAttempts {
+	for attempt := range maxAttempts {
+		tried = append(tried, n)
 		resp, err := fd.open(fd.ctx, n, rng, "")
 		if err == nil {
+			if resp.StatusCode == http.StatusForbidden && fd.ctx.Err() == nil {
+				fd.s.forbidden(fd.play.Key(), n, "start")
+				if next := fd.play.Failover(tried...); next != nil && attempt+1 < maxAttempts {
+					resp.Body.Close()
+					n = next
+					continue
+				}
+				return resp, nil // preserve the final denial for the player
+			}
 			if n != fd.play.Node() {
 				fd.play.Switched(n, "error")
 			}
@@ -176,11 +187,18 @@ func (fd *feed) start(rng string) (*http.Response, error) {
 		if fd.ctx.Err() != nil {
 			return nil, fd.ctx.Err()
 		}
-		if n = fd.play.Failover(n); n == nil {
+		if n = fd.play.Failover(tried...); n == nil {
 			break
 		}
 	}
 	return nil, control.ErrNoNode
+}
+
+// A final 403 can be specific to an exit IP. Cool down that node and log
+// its identity without exposing the signed media URL or player credentials.
+func (s *Server) forbidden(session string, n *nodes.Node, phase string) {
+	slog.Warn("media request forbidden", "session", session, "node", n.Name, "status", http.StatusForbidden, "phase", phase)
+	s.stats.Record(n, measure.Sample{Kind: measure.KindPassive, Err: "upstream answered 403 Forbidden"})
 }
 
 // open sends one upstream attempt on n under its own cancellable context.
@@ -329,10 +347,9 @@ func (fd *feed) awaitRoom(a *attempt) error {
 // other node, or follows the session if another feed already moved it; a
 // pause reopens on the session's media node once the players have drained
 // half the read-ahead. Until the new attempt is past its ramp, the node is
-// not judged on what the feed delivers. Only a node that cannot connect or
-// does not answer in time is failed over: any answer from the server ends
-// the feed, since another node would get the same. If-Range guards against
-// a file that changed: a 200 instead of 206.
+// not judged on what the feed delivers. Connection failures and final 403
+// responses try another untried node, within maxAttempts. Other HTTP errors
+// end the feed. If-Range guards against a file that changed: a 200 instead of 206.
 func (fd *feed) resume(ctx context.Context, cause error) (*http.Response, error) {
 	rng := fmt.Sprintf("bytes=%d-", fd.off)
 	if fd.end >= 0 {
@@ -340,6 +357,8 @@ func (fd *feed) resume(ctx context.Context, cause error) (*http.Response, error)
 	}
 	fd.meter.begin()
 	var n *nodes.Node
+	var tried []*nodes.Node
+	lastErr := error(control.ErrNoNode)
 	reason := ""
 	var sw switchTo
 	switch {
@@ -351,6 +370,7 @@ func (fd *feed) resume(ctx context.Context, cause error) (*http.Response, error)
 		}
 		n = fd.play.Node()
 	default:
+		tried = append(tried, fd.node)
 		reason = "error"
 		if errors.Is(cause, errStall) {
 			reason = "stall"
@@ -364,9 +384,18 @@ func (fd *feed) resume(ctx context.Context, cause error) (*http.Response, error)
 		if n == nil {
 			break
 		}
+		tried = append(tried, n)
 		resp, err := fd.open(ctx, n, rng, fd.validator)
 		switch {
 		case err != nil:
+			lastErr = err
+		case resp.StatusCode == http.StatusForbidden:
+			resp.Body.Close()
+			lastErr = fmt.Errorf("upstream answered %s", resp.Status)
+			if ctx.Err() == nil {
+				fd.s.forbidden(fd.play.Key(), n, "resume")
+			}
+			reason = "error"
 		case resp.StatusCode == http.StatusPartialContent && fd.sameFile(resp):
 			fd.node = n
 			if n != fd.play.Node() {
@@ -384,9 +413,9 @@ func (fd *feed) resume(ctx context.Context, cause error) (*http.Response, error)
 			return nil, ctx.Err()
 		}
 		reason = cmp.Or(reason, "error")
-		n = fd.play.Failover(n)
+		n = fd.play.Failover(tried...)
 	}
-	return nil, control.ErrNoNode
+	return nil, lastErr
 }
 
 // waitForRoom waits until the span's players have drained half its

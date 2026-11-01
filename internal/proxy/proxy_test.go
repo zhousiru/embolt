@@ -155,12 +155,19 @@ func newTestProxy(t *testing.T, upstream string, extra ...string) *httptest.Serv
 // newTestServer has two direct nodes, a and b; extra lines add to its config.
 func newTestServer(t *testing.T, upstream string, extra ...string) (*Server, *nodes.Pool) {
 	t.Helper()
-	// Two direct nodes; udp differs only to give them distinct IDs. No test
-	// starts but the ones a test runs itself.
-	cfg := mustParse(t, upstream, `
-proxies:
+	return newTestServerNodes(t, upstream, `
   - {name: a, type: direct, udp: false}
   - {name: b, type: direct, udp: true}
+`, extra...)
+}
+
+func newTestServerNodes(t *testing.T, upstream, nodeYAML string, extra ...string) (*Server, *nodes.Pool) {
+	t.Helper()
+	// Node options distinguish IDs. No probe starts except those explicitly
+	// run by the test.
+	cfg := mustParse(t, upstream, `
+proxies:
+`+nodeYAML+`
 probes: {budget: 0}
 data_dir: `+t.TempDir()+"\n"+strings.Join(extra, "\n"))
 	store := config.Static(cfg)

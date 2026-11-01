@@ -84,7 +84,15 @@ delivering under the bitrate drains the player. Every 2 s, each session:
 4. else stays.
 
 No answer within 8 s, no byte for 4 s, or a connection error fails over at
-once to the fastest other node. The primary is the node quickest to deliver
+once to the fastest other node. Static media requests also fail over on a
+final HTTP 403, after resolving an expired cached link again. Opening or
+resuming a stream tries at most three distinct nodes; denied nodes enter
+the normal circuit-breaker cooldown. A successful resume preserves the byte
+offset and validates the file before appending data. If no exit succeeds,
+the initial denial is relayed or the existing stream ends early. HTTP 401,
+404, 410, 416 and 429 do not trigger this failover; 5xx responses retry once
+on the same node after two seconds. Transcoded/HLS routes retain their
+existing transport-error failover behavior. The primary is the node quickest to deliver
 a page of browsing, four round trips and 3 MB, and gives way only to a node
 100 ms quicker, while nothing plays.
 
@@ -107,6 +115,7 @@ shows the strategy at work:
 
 | Message | When | Says |
 | --- | --- | --- |
+| `media request forbidden` | a static media request returns a final 403 | session, node, status and start/resume/passthrough phase |
 | `playback started` | a session starts | its node, why, and the fastest nodes as `node Mbps` |
 | `session` | every 30 s while it stays | read-ahead, deficit, whether it filled, what upstream delivered, its node's rate, verdict |
 | `move` | a step decides to switch | `reason` risk or faster, why, read-ahead, deficit, what upstream delivered, the fastest others |

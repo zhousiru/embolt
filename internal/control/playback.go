@@ -384,13 +384,13 @@ func (s *Stream) Probed(spent int64) {
 	s.nextTest = time.Now().Add(max(minTestGap, time.Duration(float64(spent)/perSec*float64(time.Second))))
 }
 
-// Failover picks a replacement after a hard failure (no bytes for 4 s or a
-// connection error): the fastest other node.
-func (p *Playback) Failover(failed *nodes.Node) *nodes.Node {
+// Failover picks the fastest usable node other than the current session
+// node and every node already tried during this recovery.
+func (p *Playback) Failover(failed ...*nodes.Node) *nodes.Node {
 	c := p.c
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if r := c.rank(c.usable(func(n *nodes.Node) bool { return n != failed && n != p.node })); len(r) > 0 {
+	if r := c.rank(c.usable(func(n *nodes.Node) bool { return !slices.Contains(failed, n) && n != p.node })); len(r) > 0 {
 		return r[0].n
 	}
 	return nil
