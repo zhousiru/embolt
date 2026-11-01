@@ -288,6 +288,14 @@ func (s *Server) replyProfileList(w http.ResponseWriter, r *http.Request, path s
 	if !count {
 		total = 0
 	}
+	if resume && !queue && s.cfg.Load().Personalization.ResumeSeriesPoster &&
+		!strings.EqualFold(qget(q, "EnableImages"), "false") &&
+		(qget(q, "EnableImageTypes") == "" || containsValue(qget(q, "EnableImageTypes"), "Primary")) &&
+		qget(q, "ImageTypeLimit") != "0" {
+		for _, it := range list {
+			resumeSeriesPoster(it)
+		}
+	}
 	writeJSON(w, map[string]any{"Items": list, "TotalRecordCount": total})
 }
 

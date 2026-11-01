@@ -38,6 +38,9 @@ proxy-providers:
 #                           # sharing one account each keep their own. Marks are
 #                           # never sent; playback reports are, unchanged.
 
+# personalization:          # requires profile: local; defaults to off
+#   resume_series_poster: false # missing episode images in Continue Watching use the series poster
+
 # probes:
 #   budget: 0.05            # share of a session's bitrate spent on speed tests; 0 turns them off
 

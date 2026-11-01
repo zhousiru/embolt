@@ -83,6 +83,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.local() && s.serveProfile(w, r) {
 		return
 	}
+	r = s.resumePosterRequest(r)
 	rt := &route{lane: s.classify(r), target: s.base}
 	if rest, ok := strings.CutPrefix(r.URL.Path, remotePrefix); ok {
 		scheme, rest, _ := strings.Cut(rest, "/")

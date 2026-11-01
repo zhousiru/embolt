@@ -41,6 +41,24 @@ change anything, edit the config, which reloads by itself.
 | `:8096` (`:8920` with TLS) | Emby-compatible ingress |
 | `:9090` | pane, `/api/v1/*`, `/metrics`, `/healthz` |
 
+## Continue Watching posters
+
+With a local profile, opt in to using the series poster for episodes without
+a primary image in Continue Watching:
+
+```yaml
+profile: local
+personalization:
+  resume_series_poster: true
+```
+
+This defaults to `false` and reloads with the config. It adds a fallback only
+to the Resume home list, leaving existing episode images, playback queues,
+item IDs and local watch state unchanged. Episodes without a series poster
+remain unchanged. Image requests keep the player's authentication and size
+parameters and use the normal image cache. Refresh Continue Watching after
+changing the option; previously loaded lists may remain in the client's cache.
+
 ## Excluding nodes
 
 Set `proxy-providers.<provider>.exclude-filter` to a Go regular expression

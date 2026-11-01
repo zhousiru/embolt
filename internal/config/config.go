@@ -37,7 +37,13 @@ type Config struct {
 	// live: "upstream" on the server's account, or "local" in
 	// data_dir/profile.json, so deployments sharing one account each keep
 	// their own.
-	Profile string `yaml:"profile"`
+	Profile         string          `yaml:"profile"`
+	Personalization Personalization `yaml:"personalization"`
+}
+
+// Personalization contains opt-in changes to the local profile's presentation.
+type Personalization struct {
+	ResumeSeriesPoster bool `yaml:"resume_series_poster"`
 }
 
 // LocalProfile reports whether user data stays in this deployment.
