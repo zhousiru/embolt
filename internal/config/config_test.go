@@ -38,3 +38,28 @@ control: {read_ahead: -1s}
 		}
 	}
 }
+
+func TestExcludeJapaneseNodeNames(t *testing.T) {
+	c, err := Parse([]byte(`
+upstream: {url: "https://emby.example"}
+proxy-providers:
+  data:
+    type: http
+    url: https://sub.example/api
+    exclude-filter: '(?i)(?:流量|到期|官网|客服|公告|重置|日本|🇯🇵|japan|\bjp\b|\bjp[0-9]+\b)'
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := c.Providers["data"]
+	for _, name := range []string{"🇯🇵日本专线02|BGP|流媒体", "日本高速04", "🇯🇵 Tokyo", "Japan 01", "JAPAN-02", "JP-01", "jp02", "剩余流量：985 GB"} {
+		if p.Keep(name) {
+			t.Errorf("prohibited node retained: %s", name)
+		}
+	}
+	for _, name := range []string{"🇭🇰香港专线03|BGP|流媒体", "🇸🇬新加坡01", "🇨🇳台湾01", "US-01", "UK-01"} {
+		if !p.Keep(name) {
+			t.Errorf("allowed node excluded: %s", name)
+		}
+	}
+}

@@ -11,6 +11,7 @@ proxy-providers:
     type: http
     url: https://provider.example/sub?token=REPLACE_ME
     interval: 21600         # seconds
+    # For upstream region restrictions, extend this name regex; see README.
     exclude-filter: '(?:流量|到期|官网|客服|公告|重置)'
 
 # dns:                      # resolves node servers; mihomo's schema, other keys ignored;

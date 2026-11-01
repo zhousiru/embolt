@@ -41,6 +41,21 @@ change anything, edit the config, which reloads by itself.
 | `:8096` (`:8920` with TLS) | Emby-compatible ingress |
 | `:9090` | pane, `/api/v1/*`, `/metrics`, `/healthz` |
 
+## Excluding nodes
+
+Set `proxy-providers.<provider>.exclude-filter` to a Go regular expression
+matching node names that must not be used. For an upstream that prohibits
+Japanese exits, combine the provider's existing exclusions with:
+
+```yaml
+exclude-filter: '(?i)(?:流量|到期|官网|客服|公告|重置|日本|🇯🇵|japan|\bjp\b|\bjp[0-9]+\b)'
+```
+
+Matching subscription nodes are removed before entering the node pool, so
+browsing, playback, failover and probes cannot select them. Apply the filter
+to every provider; inline `proxies` are not filtered. Names are labels, not
+IP geolocation: keep the pattern aligned with your provider's naming.
+
 ## How it decides
 
 Every node keeps a moving average of its rate, from 2 s samples of real
