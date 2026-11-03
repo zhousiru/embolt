@@ -3,6 +3,7 @@ package measure
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -30,6 +31,9 @@ func Ping(ctx context.Context, n *nodes.Node, base *url.URL) (Sample, error) {
 		ttfb = time.Since(start)
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 		resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			return Sample{Kind: KindPing, HTTPStatus: resp.StatusCode, Err: fmt.Sprintf("upstream answered %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))}, nil
+		}
 	}
 	return Sample{Kind: KindPing, TTFB: ttfb}, nil
 }

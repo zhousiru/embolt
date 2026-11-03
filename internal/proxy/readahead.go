@@ -760,7 +760,7 @@ func (s *Server) passThrough(w http.ResponseWriter, req *http.Request, key strin
 		}
 		tried = append(tried, n)
 		resp, err := s.fetch(n, req.Clone(ctx))
-		s.observe(ctx, n, err)
+		s.observe(ctx, n, resp, err)
 		if err == nil {
 			if resp.StatusCode == http.StatusForbidden && ctx.Err() == nil {
 				s.forbidden(play.Key(), n, "passthrough")

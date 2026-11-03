@@ -272,7 +272,7 @@ func (s *Server) send(n *nodes.Node, req *http.Request, control bool) (*http.Res
 	} else {
 		resp, err = do()
 	}
-	s.observe(req.Context(), n, err)
+	s.observe(req.Context(), n, resp, err)
 	return resp, err
 }
 
@@ -292,12 +292,19 @@ func retry5xx(ctx context.Context, do func() (*http.Response, error)) (*http.Res
 	return do()
 }
 
-func (s *Server) observe(ctx context.Context, n *nodes.Node, err error) {
+// observe records one complete attempt. Receiving an HTTP response is not
+// success: denials trip the breaker, other HTTP errors leave it unchanged.
+func (s *Server) observe(ctx context.Context, n *nodes.Node, resp *http.Response, err error) {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+		return
+	}
 	switch {
-	case err == nil:
-		s.stats.Healthy(n)
-	case ctx.Err() == nil && !errors.Is(err, context.Canceled):
+	case err != nil:
 		s.stats.Record(n, measure.Sample{Kind: measure.KindPassive, Err: measure.Redact(err)})
+	case resp != nil && resp.StatusCode == http.StatusForbidden:
+		s.stats.Record(n, measure.Sample{Kind: measure.KindPassive, HTTPStatus: resp.StatusCode, Err: "upstream answered 403 Forbidden"})
+	case resp != nil && resp.StatusCode >= 200 && resp.StatusCode < 400:
+		s.stats.Healthy(n)
 	}
 }
 

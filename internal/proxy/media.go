@@ -194,11 +194,10 @@ func (fd *feed) start(rng string) (*http.Response, error) {
 	return nil, control.ErrNoNode
 }
 
-// A final 403 can be specific to an exit IP. Cool down that node and log
+// A final 403 can be specific to an exit IP. Log
 // its identity without exposing the signed media URL or player credentials.
 func (s *Server) forbidden(session string, n *nodes.Node, phase string) {
 	slog.Warn("media request forbidden", "session", session, "node", n.Name, "status", http.StatusForbidden, "phase", phase)
-	s.stats.Record(n, measure.Sample{Kind: measure.KindPassive, Err: "upstream answered 403 Forbidden"})
 }
 
 // open sends one upstream attempt on n under its own cancellable context.
@@ -221,11 +220,11 @@ func (fd *feed) open(ctx context.Context, n *nodes.Node, rng, ifRange string) (*
 	}
 	if err != nil || actx.Err() != nil {
 		err = causeOf(actx, err)
-		fd.s.observe(ctx, n, err)
+		fd.s.observe(ctx, n, resp, err)
 		cancel(err)
 		return nil, err
 	}
-	fd.s.observe(ctx, n, nil)
+	fd.s.observe(ctx, n, resp, nil)
 	a := &attempt{resp.Body, actx, cancel}
 	fd.mu.Lock()
 	fd.live = a

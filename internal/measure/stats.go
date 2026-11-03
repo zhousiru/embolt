@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net/http"
 	"os"
 	"slices"
 	"sync"
@@ -33,13 +34,29 @@ const (
 
 // Sample is one measurement of a node's route to the Emby server.
 type Sample struct {
-	Node  string        `json:"node"`
-	Time  time.Time     `json:"time"`
-	Kind  Kind          `json:"kind"`
-	Bytes int64         `json:"bytes,omitempty"`
-	Dur   time.Duration `json:"dur,omitempty"`  // transfer time after the first byte
-	TTFB  time.Duration `json:"ttfb,omitempty"` // a ping's TTFB on a warm connection is its RTT
-	Err   string        `json:"err,omitempty"`  // node faults only: connect errors and timeouts
+	HTTPStatus int           `json:"http_status,omitempty"` // final HTTP response, when available
+	Node       string        `json:"node"`
+	Time       time.Time     `json:"time"`
+	Kind       Kind          `json:"kind"`
+	Bytes      int64         `json:"bytes,omitempty"`
+	Dur        time.Duration `json:"dur,omitempty"`  // transfer time after the first byte
+	TTFB       time.Duration `json:"ttfb,omitempty"` // a ping's TTFB on a warm connection is its RTT
+	Err        string        `json:"err,omitempty"`  // transport faults or HTTP errors
+}
+
+// outcome separates transport faults, explicit denials and other HTTP errors.
+// An HTTP error other than a denial is not evidence of route health.
+func (s Sample) outcome() outcome {
+	switch {
+	case s.HTTPStatus == http.StatusForbidden:
+		return rejected
+	case s.HTTPStatus >= 400:
+		return neutral
+	case s.Err != "":
+		return failure
+	default:
+		return success
+	}
 }
 
 // Mbps is the sample's transfer rate, or 0 if it has none: a failed sample,
@@ -81,6 +98,7 @@ func NewStats() *Stats {
 
 // Record folds a sample into the node's estimates and breaker.
 func (s *Stats) Record(n *nodes.Node, smp Sample) {
+	result := smp.outcome()
 	smp.Node = n.ID
 	if smp.Time.IsZero() {
 		smp.Time = time.Now()
@@ -93,10 +111,10 @@ func (s *Stats) Record(n *nodes.Node, smp Sample) {
 	if len(e.samples) > recentLen {
 		e.samples = e.samples[1:]
 	}
-	if e.breaker.record(smp.Err == "", smp.Time) {
+	if e.breaker.record(result, smp.Time) {
 		slog.Warn("breaker open", "node", n.Name, "until", e.breaker.until.Format(time.TimeOnly), "err", smp.Err)
 	}
-	if smp.Err != "" {
+	if result != success {
 		return
 	}
 	if smp.Kind == KindPing && smp.TTFB > 0 {
@@ -107,12 +125,12 @@ func (s *Stats) Record(n *nodes.Node, smp Sample) {
 	}
 }
 
-// Healthy notes a successful request, closing the node's breaker without
+// Healthy notes a successful request, resetting a closed or expired breaker without
 // logging a sample: control traffic is too chatty to log.
 func (s *Stats) Healthy(n *nodes.Node) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.entry(n).breaker.record(true, time.Now())
+	s.entry(n).breaker.record(success, time.Now())
 }
 
 // State returns the node's estimates.
@@ -206,23 +224,34 @@ func (s *Stats) Restore(path string) error {
 	return json.Unmarshal(raw, &s.nodes)
 }
 
+type outcome uint8
+
+const (
+	success outcome = iota
+	failure
+	rejected
+	neutral
+)
+
 // breaker opens after 3 consecutive node faults, for 30 s doubling to 10 min.
-// After it closes, a single fault reopens it; a success resets it.
+// A definitive rejection opens it immediately. While open, all outcomes are
+// ignored: concurrent requests and probes cannot shorten or extend cooldown.
+// After expiry, a fault reopens it; a success resets it.
 type breaker struct {
 	fails   int
 	backoff time.Duration
 	until   time.Time
 }
 
-func (b *breaker) record(ok bool, now time.Time) (tripped bool) {
-	if ok {
+func (b *breaker) record(result outcome, now time.Time) (tripped bool) {
+	if result == neutral || now.Before(b.until) {
+		return false
+	}
+	if result == success {
 		*b = breaker{}
 		return false
 	}
-	if now.Before(b.until) {
-		return false
-	}
-	if b.fails++; b.fails < 3 {
+	if b.fails++; result != rejected && b.fails < 3 {
 		return false
 	}
 	b.backoff = min(max(2*b.backoff, 30*time.Second), 10*time.Minute)

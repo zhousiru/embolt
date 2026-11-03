@@ -75,10 +75,10 @@ func (t test) read(ctx context.Context, n *nodes.Node, m *meter) (int64, error) 
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", t.from, t.end))
 	req.Header.Del("If-Range")
 	resp, err := t.s.fetch(n, req)
-	t.s.observe(ctx, n, err)
 	if err != nil {
 		return 0, causeOf(ctx, err)
 	}
+	t.s.observe(ctx, n, resp, nil)
 	defer resp.Body.Close()
 	if first, _, _, ok := contentRange(resp.Header.Get("Content-Range")); resp.StatusCode != http.StatusPartialContent ||
 		!ok || first != t.from {

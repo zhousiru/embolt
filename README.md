@@ -105,8 +105,12 @@ No answer within 8 s, no byte for 4 s, or a connection error fails over at
 once to the fastest other node. Static media requests also fail over on a
 final HTTP 403, after resolving an expired cached link again. Opening or
 resuming a stream tries at most three distinct nodes; denied nodes enter
-the normal circuit-breaker cooldown. A successful resume preserves the byte
-offset and validates the file before appending data. If no exit succeeds,
+an immediate circuit-breaker cooldown (30 s, doubling up to 10 min).
+Request outcomes are evaluated once, after cached-link refresh and redirects:
+403 opens the breaker immediately; other HTTP errors do not mark a node healthy.
+Successes during cooldown cannot reset it; after expiry a success resets the
+backoff and a fault reopens it. This also applies to background exploration
+and health probes. A successful resume preserves the byte offset and validates the file before appending data. If no exit succeeds,
 the initial denial is relayed or the existing stream ends early. HTTP 401,
 404, 410, 416 and 429 do not trigger this failover; 5xx responses retry once
 on the same node after two seconds. Transcoded/HLS routes retain their
@@ -141,7 +145,7 @@ shows the strategy at work:
 | `explore` / `explored` | a speed test starts / ends | the node, why it was tested, what it delivered, its rate after |
 | `primary switched` | the primary changes | burst times of both |
 | `pinged` | each ping round | nodes, how many answered |
-| `breaker open` | a node faults 3 times | until when |
+| `breaker open` | a node faults 3 times or returns a final 403 | until when |
 | `playback ended` | a session ends | node, failovers, tests, minutes |
 
 ```sh

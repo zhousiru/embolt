@@ -2,10 +2,13 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"github.com/zhousiru/embolt/internal/measure"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -46,7 +49,7 @@ func TestForbiddenFailoverPreservesStream(t *testing.T) {
 				http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(file))
 			}))
 			defer upstream.Close()
-			s, _ := newTestServerNodes(t, upstream.URL, fourDirectNodes)
+			s, pool := newTestServerNodes(t, upstream.URL, fourDirectNodes)
 			px := httptest.NewServer(s)
 			defer px.Close()
 			req, _ := http.NewRequest(http.MethodGet, px.URL+"/Videos/42/stream?Static=true&PlaySessionId=forbidden", nil)
@@ -60,6 +63,15 @@ func TestForbiddenFailoverPreservesStream(t *testing.T) {
 			got, err := io.ReadAll(resp.Body)
 			if err != nil || resp.StatusCode != http.StatusPartialContent || !bytes.Equal(got, file[1000:]) {
 				t.Fatalf("status=%d bytes=%d err=%v; want intact 206", resp.StatusCode, len(got), err)
+			}
+			open := 0
+			for _, n := range pool.All() {
+				if s.stats.Open(n, time.Now()) {
+					open++
+				}
+			}
+			if open != 1 {
+				t.Fatalf("open breakers=%d, want denied node only", open)
 			}
 			want := int32(2)
 			if midstream {
@@ -87,7 +99,7 @@ func TestMediaHTTPErrorPolicy(t *testing.T) {
 					http.Error(w, "denied", code)
 				}))
 				defer upstream.Close()
-				s, _ := newTestServerNodes(t, upstream.URL, fourDirectNodes)
+				s, pool := newTestServerNodes(t, upstream.URL, fourDirectNodes)
 				req := httptest.NewRequest(http.MethodGet, "/Videos/42/stream?Static=true&PlaySessionId=denied", nil)
 				req.Header.Set("Range", "bytes=0-")
 				if passthrough {
@@ -101,6 +113,19 @@ func TestMediaHTTPErrorPolicy(t *testing.T) {
 				want := 1
 				if code == 403 {
 					want = maxAttempts
+				}
+				open := 0
+				for _, n := range pool.All() {
+					if s.stats.Open(n, time.Now()) {
+						open++
+					}
+				}
+				wantOpen := 0
+				if code == 403 {
+					wantOpen = maxAttempts
+				}
+				if open != wantOpen {
+					t.Fatalf("open breakers=%d want=%d", open, wantOpen)
 				}
 				mu.Lock()
 				defer mu.Unlock()
@@ -130,7 +155,7 @@ func TestResumeHTTPErrorPolicy(t *testing.T) {
 				w.WriteHeader(code)
 			}))
 			defer upstream.Close()
-			s, _ := newTestServerNodes(t, upstream.URL, fourDirectNodes)
+			s, pool := newTestServerNodes(t, upstream.URL, fourDirectNodes)
 			play, err := s.ctrl.Play("tv/1", 20)
 			if err != nil {
 				t.Fatal(err)
@@ -159,9 +184,133 @@ func TestResumeHTTPErrorPolicy(t *testing.T) {
 			if requests.Load() != want {
 				t.Fatalf("requests=%d want=%d", requests.Load(), want)
 			}
+			open := 0
+			for _, n := range pool.All() {
+				if s.stats.Open(n, time.Now()) {
+					open++
+				}
+			}
+			wantOpen := 0
+			if code == 403 {
+				wantOpen = maxAttempts
+			}
+			if open != wantOpen {
+				t.Fatalf("open breakers=%d want=%d", open, wantOpen)
+			}
 			if s.ctrl.Sessions()[0].Failovers != 0 {
 				t.Fatal("failed resume counted as successful switch")
 			}
 		})
+	}
+}
+
+// A denied node stays excluded across independent requests, successful control
+// traffic and probe samples, rather than only within one failover loop.
+func TestDeniedNodeStaysExcluded(t *testing.T) {
+	s, pool := newTestServerNodes(t, "http://emby", fourDirectNodes)
+	n := pool.All()[0]
+	s.observe(t.Context(), n, &http.Response{StatusCode: 403}, nil)
+	until := s.stats.State(n).OpenUntil
+	for _, code := range []int{200, 206, 302, 401, 404, 429, 503} {
+		s.observe(t.Context(), n, &http.Response{StatusCode: code}, nil)
+	}
+	s.stats.Record(n, measure.Sample{Kind: measure.KindPing, TTFB: time.Millisecond})
+	s.stats.Record(n, measure.Sample{Kind: measure.KindPassive, Bytes: 1 << 20, Dur: time.Second})
+	if s.stats.State(n).OpenUntil != until || !s.stats.Open(n, time.Now()) {
+		t.Fatal("success cleared active cooldown")
+	}
+	play, err := s.ctrl.Play("fresh/session", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer play.Release()
+	if play.Node() == n {
+		t.Fatal("new playback selected denied node")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	other := pool.All()[1]
+	s.observe(ctx, other, &http.Response{StatusCode: 403}, nil)
+	if s.stats.Open(other, time.Now()) {
+		t.Fatal("cancelled request tripped breaker")
+	}
+}
+
+func TestPingHTTPOutcomes(t *testing.T) {
+	for _, code := range []int{200, 403, 401, 429, 503} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(code) }))
+			defer upstream.Close()
+			s, pool := newTestServerNodes(t, upstream.URL, fourDirectNodes)
+			n := pool.All()[0]
+			base, _ := url.Parse(upstream.URL)
+			sample, err := measure.Ping(t.Context(), n, base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.stats.Record(n, sample)
+			if s.stats.Open(n, time.Now()) != (code == 403) {
+				t.Fatal("incorrect ping breaker outcome")
+			}
+			if s.stats.State(n).RTT.Measured() != (code == 200) {
+				t.Fatal("HTTP error measured as healthy ping")
+			}
+		})
+	}
+}
+
+func TestExploreDenialTripsOnlyTestedNode(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(403) }))
+	defer upstream.Close()
+	s, pool := newTestServerNodes(t, upstream.URL, fourDirectNodes)
+	play, err := s.ctrl.Play("main/session", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer play.Release()
+	for _, n := range pool.All() {
+		if n == play.Node() {
+			continue
+		}
+		req, _ := http.NewRequest(http.MethodGet, upstream.URL+"/Videos/42/stream", nil)
+		probe := test{s: s, req: req, from: 0, end: 100}
+		probe.run(t.Context(), play, n)
+		if !s.stats.Open(n, time.Now()) || s.stats.Open(play.Node(), time.Now()) {
+			t.Fatal("exploration did not isolate the denied node")
+		}
+		if len(s.stats.Recent(n)) != 1 {
+			t.Fatal("one denial recorded more than once")
+		}
+		break
+	}
+}
+
+func TestExpiredCachedLinkDoesNotTripBreaker(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/expired" {
+			w.WriteHeader(403)
+			return
+		}
+		http.ServeContent(w, r, "", time.Time{}, bytes.NewReader([]byte("media")))
+	}))
+	defer upstream.Close()
+	s, _ := newTestServerNodes(t, upstream.URL, fourDirectNodes)
+	play, err := s.ctrl.Play("link/session", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer play.Release()
+	n := play.Node()
+	req, _ := http.NewRequest(http.MethodGet, upstream.URL+"/Videos/42/stream", nil)
+	expired, _ := url.Parse(upstream.URL + "/expired")
+	s.links.put(n.ID+" "+req.URL.String(), expired)
+	fd := &feed{s: s, play: play, req: req, ctx: t.Context()}
+	resp, err := fd.open(t.Context(), n, "bytes=0-", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 206 || s.stats.Open(n, time.Now()) {
+		t.Fatal("expired link was treated as final denial")
 	}
 }
