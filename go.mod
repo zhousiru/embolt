@@ -5,7 +5,7 @@ go 1.26
 ignore ./web/node_modules
 
 require (
-	github.com/metacubex/mihomo v1.19.32
+	github.com/metacubex/mihomo v1.19.33
 	github.com/prometheus/client_golang v1.24.1
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/sync v0.22.0
@@ -23,7 +23,7 @@ require (
 	github.com/coreos/go-iptables v0.8.0 // indirect
 	github.com/dunglas/httpsfv v1.0.2 // indirect
 	github.com/easytier/easytier/easytier-go v0.0.0-20260910071355-3d0c9c3ca5e2 // indirect
-	github.com/enfein/mieru/v3 v3.38.0 // indirect
+	github.com/enfein/mieru/v3 v3.38.1 // indirect
 	github.com/ericlagergren/aegis v0.0.0-20250325060835-cd0defd64358 // indirect
 	github.com/ericlagergren/polyval v0.0.0-20220411101811-e25bc10ba391 // indirect
 	github.com/ericlagergren/siv v0.0.0-20220507050439-0b757b3aa5f1 // indirect
@@ -67,7 +67,7 @@ require (
 	github.com/metacubex/jls-tls v0.0.0-20260723084315-67adc0e2f796 // indirect
 	github.com/metacubex/jsonv2 v0.0.0-20260721082349-16b4998c8f89 // indirect
 	github.com/metacubex/kcp-go v0.0.0-20260105040817-550693377604 // indirect
-	github.com/metacubex/mipstack v0.0.0-20260930071539-961d4b1c1983 // indirect
+	github.com/metacubex/mipstack v0.0.0-20261019124225-9a80a07eaeb9 // indirect
 	github.com/metacubex/mlkem v0.1.0 // indirect
 	github.com/metacubex/qpack v0.6.0 // indirect
 	github.com/metacubex/quic-go v0.61.1-0.20260727080200-2548683b76f4 // indirect
@@ -79,13 +79,13 @@ require (
 	github.com/metacubex/sing-shadowsocks v0.2.13 // indirect
 	github.com/metacubex/sing-shadowsocks2 v0.2.8 // indirect
 	github.com/metacubex/sing-vmess v0.2.5 // indirect
-	github.com/metacubex/sing-wireguard v0.0.0-20260826105301-c3ae17d19f9e // indirect
+	github.com/metacubex/sing-wireguard v0.0.0-20261002050126-e5fa1a607406 // indirect
 	github.com/metacubex/smux v0.0.0-20260105030934-d0c8756d3141 // indirect
 	github.com/metacubex/ssh v0.1.0 // indirect
 	github.com/metacubex/tailscale v0.0.0-20260821153257-ff0ecd818181 // indirect
 	github.com/metacubex/tailscale-wireguard-go v0.0.0-20260725073821-e61ab99cede2 // indirect
 	github.com/metacubex/tfo-go v0.0.0-20260623020846-376a77860b8c // indirect
-	github.com/metacubex/tls v0.1.8 // indirect
+	github.com/metacubex/tls v0.1.9 // indirect
 	github.com/metacubex/utls v1.8.8 // indirect
 	github.com/metacubex/wazero v0.0.0-20260628025728-9ae6bdcf2a7d // indirect
 	github.com/metacubex/wireguard-go v0.0.0-20250820062549-a6cecdd7f57f // indirect
