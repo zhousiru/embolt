@@ -197,7 +197,7 @@ func (c *Controller) pickMedia(bitrate float64) (*nodes.Node, string, []ranked) 
 	if len(r) == 0 {
 		return nil, "", nil
 	}
-	if c.primary != nil && !c.open(c.primary) {
+	if c.primary != nil && !c.open(c.primary) && c.tier(c.primary) <= r[0].tier {
 		if st := c.stats.State(c.primary); st.Rate.Measured() && st.Rate.Value >= headroom*bitrate {
 			return c.primary, "the primary is fast enough", r
 		}

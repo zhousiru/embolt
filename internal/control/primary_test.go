@@ -35,3 +35,26 @@ func TestReconsiderLeavesAFailedPrimary(t *testing.T) {
 		t.Fatalf("primary %v, want b", c.primary)
 	}
 }
+
+// Media follows the same rule: play start and failover skip a node whose
+// latest attempt failed, however fast it once was.
+func TestMediaPrefersNodesThatAnswer(t *testing.T) {
+	c, n := testController(t, map[string][]float64{"a": {100}, "b": {20}, "c": {50}})
+	c.stats.Record(n["a"], measure.Sample{Kind: measure.KindPassive, Err: "stall"})
+	p, err := c.Play("tv/1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Node() != n["c"] {
+		t.Fatalf("media node %v, want c: a just stalled", p.Node())
+	}
+	c.stats.Record(n["b"], measure.Sample{Kind: measure.KindPassive, Err: "stall"})
+	if alt := p.Failover(n["c"]); alt != n["a"] {
+		// a and b both failed last; a is faster.
+		t.Fatalf("failover %v, want a", alt)
+	}
+	c.stats.Healthy(n["b"])
+	if alt := p.Failover(n["c"]); alt != n["b"] {
+		t.Fatalf("failover %v, want b: it answered since, a did not", alt)
+	}
+}

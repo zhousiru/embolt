@@ -39,8 +39,9 @@ func burstMs(st measure.State) float64 {
 
 // ranked is a node with its state as of the ranking.
 type ranked struct {
-	n  *nodes.Node
-	st measure.State
+	n    *nodes.Node
+	st   measure.State
+	tier int
 }
 
 // faster orders nodes for media, fastest first: a measured rate before
@@ -60,13 +61,13 @@ func rttMs(st measure.State) float64 {
 	return st.RTT.Value
 }
 
-// rank orders ns for media, fastest first.
+// rank orders ns for media: healthiest tier first, then fastest.
 func (c *Controller) rank(ns []*nodes.Node) []ranked {
 	out := make([]ranked, len(ns))
 	for i, n := range ns {
-		out[i] = ranked{n, c.stats.State(n)}
+		out[i] = ranked{n, c.stats.State(n), c.tier(n)}
 	}
-	slices.SortStableFunc(out, func(a, b ranked) int { return faster(a.st, b.st) })
+	slices.SortStableFunc(out, func(a, b ranked) int { return cmp.Or(cmp.Compare(a.tier, b.tier), faster(a.st, b.st)) })
 	return out
 }
 

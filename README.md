@@ -120,13 +120,17 @@ a page of browsing, four round trips and 3 MB, and gives way only to a node
 (connect, TLS handshake, dropped connection) moves the primary to the next
 quickest node at once and is sent again there, up to three distinct nodes;
 request bodies up to 1 MB are kept for the replay, websocket upgrades are not
-replayed. Only when every attempt fails does the player see 502. Choosing the primary
-weighs current health before speed: nodes whose latest request or probe
-succeeded come first, then nodes not yet tried since start, then nodes whose
-latest attempt failed or was denied, and the quickest wins within that group.
-A primary that just failed gives way at the next ping round even during
-playback, and a failed-over control request asks for an early ping round (at
-most one a minute) so health stays current.
+replayed. Only when every attempt fails does the player see 502.
+
+Every choice of node, control and media alike, weighs current health before
+speed: nodes whose latest request or probe succeeded come first, then nodes
+not yet tried since start, then nodes whose latest attempt failed, stalled or
+was denied. Speed (burst time for the primary, rate for media) only orders
+nodes within a tier, so stale estimates never send a play start, failover or
+move to a node that just failed while another is known to answer. A healthier
+node takes the primary at the next ping round even during playback, and a
+failed-over control request asks for an early ping round (at most one a
+minute) so health stays current. Exploration still tests nodes in any tier.
 
 Rates are learned from playback alone. Every stream samples its media node,
 and a session tests other nodes beside it: while its media node keeps

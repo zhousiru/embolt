@@ -161,18 +161,34 @@ func (c *Controller) PrimaryFailed(failed ...*nodes.Node) *nodes.Node {
 	return alt
 }
 
-// pickPrimary is the quickest usable node that passes keep, among those
-// whose latest attempt succeeded if any, else among those not tried since
-// start, else among the rest. Old speed estimates must not send control
-// traffic to a node that just failed while another is known to answer.
+// pickPrimary is the quickest of the healthiest usable nodes that pass keep.
 func (c *Controller) pickPrimary(keep func(*nodes.Node) bool) *nodes.Node {
-	ns := c.usable(keep)
-	for _, h := range []measure.Health{measure.HealthUp, measure.HealthUnknown, measure.HealthDown} {
-		if n := c.quickest(slices.DeleteFunc(slices.Clone(ns), func(n *nodes.Node) bool { return c.stats.Health(n) != h })); n != nil {
-			return n
-		}
+	return c.quickest(c.healthiest(c.usable(keep)))
+}
+
+// tier is the health rule every choice of node follows, control and media
+// alike: nodes whose latest attempt succeeded (0), then nodes not tried since
+// start (1), then nodes whose latest attempt failed or was denied (2). Old
+// speed estimates only order nodes within a tier, so they never send traffic
+// to a node that just failed while another is known to answer.
+func (c *Controller) tier(n *nodes.Node) int {
+	switch c.stats.Health(n) {
+	case measure.HealthUp:
+		return 0
+	case measure.HealthUnknown:
+		return 1
+	default:
+		return 2
 	}
-	return nil
+}
+
+// healthiest keeps the nodes of ns in its best tier.
+func (c *Controller) healthiest(ns []*nodes.Node) []*nodes.Node {
+	best := 3
+	for _, n := range ns {
+		best = min(best, c.tier(n))
+	}
+	return slices.DeleteFunc(slices.Clone(ns), func(n *nodes.Node) bool { return c.tier(n) != best })
 }
 
 // primaryGone reports whether there is no primary, or it left the pool or
@@ -201,9 +217,9 @@ func (c *Controller) reconsiderPrimary() {
 	best := c.pickPrimary(func(n *nodes.Node) bool { return n != c.primary })
 	switch {
 	case best == nil:
-	case c.stats.Health(c.primary) == measure.HealthDown && c.stats.Health(best) != measure.HealthDown:
-		c.setPrimary(best) // the primary failed its last attempt; another did not
-	case c.stats.Health(best) == measure.HealthUp && !c.playing() && c.burst(best)+primaryMargin < c.burst(c.primary):
+	case c.tier(best) < c.tier(c.primary):
+		c.setPrimary(best) // a healthier node beats any speed margin, even during playback
+	case c.tier(best) == c.tier(c.primary) && !c.playing() && c.burst(best)+primaryMargin < c.burst(c.primary):
 		c.setPrimary(best)
 	}
 }
