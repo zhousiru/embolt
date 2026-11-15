@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/url"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -131,6 +132,20 @@ func (c *Controller) Primary() (*nodes.Node, error) {
 		return nil, ErrNoNode
 	}
 	return c.primary, nil
+}
+
+// PrimaryFailed moves control traffic off nodes that failed a request:
+// failed lists every node tried for it. It returns the quickest usable node
+// not among them, which becomes the primary if the primary failed, or nil if
+// none is left. A pinned primary stays pinned.
+func (c *Controller) PrimaryFailed(failed ...*nodes.Node) *nodes.Node {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	alt := c.quickest(c.usable(func(n *nodes.Node) bool { return !slices.Contains(failed, n) }))
+	if alt != nil && slices.Contains(failed, c.primary) {
+		c.setPrimary(alt)
+	}
+	return alt
 }
 
 // primaryGone reports whether there is no primary, or it left the pool or

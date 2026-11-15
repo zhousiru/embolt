@@ -111,6 +111,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		rt.node = n
+		if r, err = keepBody(r); err != nil {
+			http.Error(w, "embolt: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 		if cacheable(r) {
 			rt.cacheKey = cache.Key(r)
 			if s.cache.Serve(w, r, rt.cacheKey) {
@@ -249,12 +253,86 @@ type routeTransport struct{ s *Server }
 func (t routeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	rt := routeOf(req)
 	resp, err := t.s.send(rt.node, req, rt.lane == laneControl)
-	if err != nil && rt.play != nil && req.Context().Err() == nil {
+	switch {
+	case err == nil || req.Context().Err() != nil:
+	case rt.play != nil:
 		if alt := rt.play.Failover(rt.node); alt != nil {
 			return t.s.send(alt, req, false)
 		}
+	case rt.lane == laneControl:
+		return t.s.failoverControl(req, rt.node, err)
 	}
 	return resp, err
+}
+
+// controlAttempts caps the distinct nodes one control request may try.
+const controlAttempts = 3
+
+// failoverControl moves the primary off a node whose control request failed
+// in transport, and sends the request again on the next quickest node while
+// it can be replayed, so one bad exit does not surface as 502 to the player.
+func (s *Server) failoverControl(req *http.Request, failed *nodes.Node, err error) (*http.Response, error) {
+	tried := []*nodes.Node{failed}
+	for len(tried) < controlAttempts {
+		alt := s.ctrl.PrimaryFailed(tried...)
+		if alt == nil || !replayable(req) {
+			break
+		}
+		slog.Info("control request failed over", "path", req.URL.Path, "from", tried[len(tried)-1].Name,
+			"to", alt.Name, "err", measure.Redact(err))
+		retry, rerr := rewind(req)
+		if rerr != nil {
+			break
+		}
+		var resp *http.Response
+		if resp, err = s.send(alt, retry, true); err == nil || req.Context().Err() != nil {
+			return resp, err
+		}
+		tried = append(tried, alt)
+	}
+	if len(tried) == controlAttempts {
+		s.ctrl.PrimaryFailed(tried...)
+	}
+	return nil, err
+}
+
+// replayCap is the largest control request body kept for a replay.
+const replayCap = 1 << 20
+
+// keepBody buffers a small control request body so the request can be sent
+// again through another node.
+func keepBody(r *http.Request) (*http.Request, error) {
+	if r.Body == nil || r.Body == http.NoBody || r.ContentLength <= 0 || r.ContentLength > replayCap || r.Header.Get("Upgrade") != "" {
+		return r, nil
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, replayCap+1))
+	r.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	r = r.Clone(r.Context())
+	r.Body = io.NopCloser(bytes.NewReader(raw))
+	r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(raw)), nil }
+	return r, nil
+}
+
+// replayable reports whether req can be sent again: it has no body, or one
+// keepBody kept, and is not a protocol upgrade.
+func replayable(req *http.Request) bool {
+	return req.Header.Get("Upgrade") == "" && (req.Body == nil || req.Body == http.NoBody || req.GetBody != nil)
+}
+
+// rewind is a copy of req with a fresh body.
+func rewind(req *http.Request) (*http.Request, error) {
+	out := req.Clone(req.Context())
+	if req.GetBody != nil {
+		body, err := req.GetBody()
+		if err != nil {
+			return nil, err
+		}
+		out.Body = body
+	}
+	return out, nil
 }
 
 // send performs one request on n. A transport error counts against the node;

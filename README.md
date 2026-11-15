@@ -116,7 +116,11 @@ the initial denial is relayed or the existing stream ends early. HTTP 401,
 on the same node after two seconds. Transcoded/HLS routes retain their
 existing transport-error failover behavior. The primary is the node quickest to deliver
 a page of browsing, four round trips and 3 MB, and gives way only to a node
-100 ms quicker, while nothing plays.
+100 ms quicker, while nothing plays. A control request that fails in transport
+(connect, TLS handshake, dropped connection) moves the primary to the next
+quickest node at once and is sent again there, up to three distinct nodes;
+request bodies up to 1 MB are kept for the replay, websocket upgrades are not
+replayed. Only when every attempt fails does the player see 502.
 
 Rates are learned from playback alone. Every stream samples its media node,
 and a session tests other nodes beside it: while its media node keeps
@@ -144,6 +148,7 @@ shows the strategy at work:
 | `switched` | a feed reconnects on another node | `reason` risk, faster, stall or error, read-ahead, both nodes' rates |
 | `explore` / `explored` | a speed test starts / ends | the node, why it was tested, what it delivered, its rate after |
 | `primary switched` | the primary changes | burst times of both |
+| `control request failed over` | a control request is sent again on another node | path, both nodes, the error |
 | `pinged` | each ping round | nodes, how many answered |
 | `breaker open` | a node faults 3 times or returns a final 403 | until when |
 | `playback ended` | a session ends | node, failovers, tests, minutes |
