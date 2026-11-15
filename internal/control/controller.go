@@ -29,6 +29,7 @@ const (
 	playLinger    = 2 * time.Minute // keeps a session's nodes across seeks
 	firstRunMbps  = 40.0            // the bitrate to judge at before any session reports one
 	peakMemory    = 7 * 24 * time.Hour
+	minKickGap    = time.Minute // between ping rounds a failed control request asks for
 )
 
 var ErrNoNode = errors.New("no usable node")
@@ -44,6 +45,8 @@ type Controller struct {
 	base  *url.URL
 
 	lastActive atomic.Int64
+	kick       chan struct{} // asks Run for an early ping round
+	pinged     atomic.Int64  // when the last ping round ended, unix ns
 
 	mu      sync.Mutex
 	primary *nodes.Node
@@ -64,6 +67,7 @@ func New(cfg *config.Store, pool *nodes.Pool, stats *measure.Stats) *Controller 
 		base:   cfg.Load().Upstream.Base(),
 		plays:  map[string]*Playback{},
 		tested: map[string]time.Time{},
+		kick:   make(chan struct{}, 1),
 	}
 }
 
@@ -91,6 +95,11 @@ func (c *Controller) Run(ctx context.Context) {
 		case <-ping.C:
 			c.pingAll(ctx)
 			ping.Reset(c.pingInterval())
+		case <-c.kick:
+			if time.Since(time.Unix(0, c.pinged.Load())) >= minKickGap {
+				c.pingAll(ctx)
+				ping.Reset(c.pingInterval())
+			}
 		case <-expire.C:
 			c.expire()
 		}
@@ -126,7 +135,7 @@ func (c *Controller) Primary() (*nodes.Node, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.primaryGone() {
-		c.setPrimary(c.quickest(c.usable(nil)))
+		c.setPrimary(c.pickPrimary(nil))
 	}
 	if c.primary == nil {
 		return nil, ErrNoNode
@@ -141,11 +150,29 @@ func (c *Controller) Primary() (*nodes.Node, error) {
 func (c *Controller) PrimaryFailed(failed ...*nodes.Node) *nodes.Node {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	alt := c.quickest(c.usable(func(n *nodes.Node) bool { return !slices.Contains(failed, n) }))
+	alt := c.pickPrimary(func(n *nodes.Node) bool { return !slices.Contains(failed, n) })
 	if alt != nil && slices.Contains(failed, c.primary) {
 		c.setPrimary(alt)
 	}
+	select {
+	case c.kick <- struct{}{}:
+	default:
+	}
 	return alt
+}
+
+// pickPrimary is the quickest usable node that passes keep, among those
+// whose latest attempt succeeded if any, else among those not tried since
+// start, else among the rest. Old speed estimates must not send control
+// traffic to a node that just failed while another is known to answer.
+func (c *Controller) pickPrimary(keep func(*nodes.Node) bool) *nodes.Node {
+	ns := c.usable(keep)
+	for _, h := range []measure.Health{measure.HealthUp, measure.HealthUnknown, measure.HealthDown} {
+		if n := c.quickest(slices.DeleteFunc(slices.Clone(ns), func(n *nodes.Node) bool { return c.stats.Health(n) != h })); n != nil {
+			return n
+		}
+	}
+	return nil
 }
 
 // primaryGone reports whether there is no primary, or it left the pool or
@@ -168,11 +195,15 @@ func (c *Controller) reconsiderPrimary() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.primaryGone() {
-		c.setPrimary(c.quickest(c.usable(nil)))
+		c.setPrimary(c.pickPrimary(nil))
 		return
 	}
-	best := c.quickest(c.usable(func(n *nodes.Node) bool { return n != c.primary }))
-	if best != nil && !c.playing() && c.burst(best)+primaryMargin < c.burst(c.primary) {
+	best := c.pickPrimary(func(n *nodes.Node) bool { return n != c.primary })
+	switch {
+	case best == nil:
+	case c.stats.Health(c.primary) == measure.HealthDown && c.stats.Health(best) != measure.HealthDown:
+		c.setPrimary(best) // the primary failed its last attempt; another did not
+	case c.stats.Health(best) == measure.HealthUp && !c.playing() && c.burst(best)+primaryMargin < c.burst(c.primary):
 		c.setPrimary(best)
 	}
 }
@@ -198,6 +229,7 @@ func (c *Controller) pingAll(ctx context.Context) {
 		})
 	}
 	wg.Wait()
+	c.pinged.Store(time.Now().UnixNano())
 	slog.Info("pinged", "nodes", len(all), "ok", ok.Load(), "took_s", round1(time.Since(start).Seconds()))
 	c.reconsiderPrimary()
 }

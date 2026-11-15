@@ -88,7 +88,27 @@ type entry struct {
 	Rate    Estimate  `json:"mbps"`
 	Seen    time.Time `json:"seen"`
 	breaker breaker
+	health  Health
 	samples []Sample
+}
+
+// Health is how a node's latest request or probe in this run ended. It is
+// not persisted: after a restart every node is HealthUnknown until used.
+type Health uint8
+
+const (
+	HealthUnknown Health = iota // not tried since start
+	HealthUp                    // the latest attempt succeeded
+	HealthDown                  // the latest attempt faulted or was denied
+)
+
+func (h *Health) note(result outcome) {
+	switch result {
+	case success:
+		*h = HealthUp
+	case failure, rejected:
+		*h = HealthDown
+	}
 }
 
 // NewStats keeps estimates for every node.
@@ -107,6 +127,7 @@ func (s *Stats) Record(n *nodes.Node, smp Sample) {
 	defer s.mu.Unlock()
 	e := s.entry(n)
 	e.Seen = smp.Time
+	e.health.note(result)
 	e.samples = append(e.samples, smp)
 	if len(e.samples) > recentLen {
 		e.samples = e.samples[1:]
@@ -130,7 +151,19 @@ func (s *Stats) Record(n *nodes.Node, smp Sample) {
 func (s *Stats) Healthy(n *nodes.Node) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.entry(n).breaker.record(success, time.Now())
+	e := s.entry(n)
+	e.health.note(success)
+	e.breaker.record(success, time.Now())
+}
+
+// Health reports how n's latest attempt ended.
+func (s *Stats) Health(n *nodes.Node) Health {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e := s.nodes[n.ID]; e != nil {
+		return e.health
+	}
+	return HealthUnknown
 }
 
 // State returns the node's estimates.
