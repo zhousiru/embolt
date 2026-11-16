@@ -7,7 +7,7 @@ ignore ./web/node_modules
 require (
 	github.com/metacubex/mihomo v1.19.32
 	github.com/prometheus/client_golang v1.24.1
-	go.yaml.in/yaml/v3 v3.0.5
+	go.yaml.in/yaml/v3 v3.0.6
 	golang.org/x/sync v0.22.0
 )
 
